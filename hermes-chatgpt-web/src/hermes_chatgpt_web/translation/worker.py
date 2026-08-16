@@ -40,7 +40,7 @@ from .prompt import (
 )
 from .signals import job_notify
 
-MAX_LLM_API_RETRIES = 3
+MAX_LLM_API_RETRIES = 1
 MAX_SQLITE_RETRIES = 3
 LLM_BACKOFF_SCHEDULE = [2, 5, 10]  # seconds
 
