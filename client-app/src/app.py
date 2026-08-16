@@ -1,9 +1,9 @@
 import argparse
 import json
-from pathlib import Path
 import re
 import sys
 import time
+from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -751,7 +751,7 @@ def cmd_database(args):
         ok, path_or_err, byte_count = backup_database(output_path=out_path)
         if ok:
             mb = byte_count / (1024 * 1024)
-            print(f"[+] Backup successfully downloaded!")
+            print("[+] Backup successfully downloaded!")
             print(f"    - File : {path_or_err}")
             print(f"    - Size : {byte_count:,} bytes ({mb:.2f} MB)")
         else:

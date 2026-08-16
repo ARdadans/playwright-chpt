@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from ..chatgpt.worker_pool import worker_pool
 from ..core.browser import PlaywrightBrowser
 from ..core.config import ADAPTER_PORT
+from ..core.executor import run_in_browser_thread
 from ..core.logger import (
     log_browser,
     log_db,
@@ -111,7 +112,7 @@ async def lifespan(app: FastAPI):
         log_startup(f"Launching Playwright browser with {len(active_accounts)} active worker contexts...")
         try:
             headless = os.environ.get("HERMES_HEADLESS", "0").lower() in ("1", "true")
-            await asyncio.to_thread(_boot_browser_pool_sync, headless, active_accounts)
+            await run_in_browser_thread(_boot_browser_pool_sync, headless, active_accounts)
         except Exception as e:
             log_error(f"Browser launch failed: {e}")
             sys.exit(1)
@@ -141,7 +142,7 @@ async def lifespan(app: FastAPI):
 
     browser = shared_state.get("browser")
     if browser:
-        await asyncio.to_thread(browser.stop)
+        await run_in_browser_thread(browser.stop)
     log_server("Shutdown completed")
 
 

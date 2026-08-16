@@ -1,8 +1,8 @@
 import json
-from pathlib import Path
 import re
 import sys
 import time
+from pathlib import Path
 
 # Ensure safe UTF-8 output on all terminal platforms (Windows, Linux, macOS)
 if hasattr(sys.stdout, "reconfigure"):
@@ -38,7 +38,6 @@ from services.api import (
     get_glossary,
     get_job,
     get_job_history,
-    get_models,
     get_novel_chapters,
     get_novel_history,
     get_novel_stats,
@@ -240,7 +239,7 @@ def interactive_translate():
         print(f"{GREEN}[+] Job berhasil dikirim! Job ID: {BOLD}{job_id}{RESET}")
 
     if wait_flag or out_file:
-        print(f"[*] Menunggu pengerjaan worker (polling realtime)...")
+        print("[*] Menunggu pengerjaan worker (polling realtime)...")
 
         def on_status_change(j):
             print(f"    Status beralih -> {BOLD}{j.get('status')}{RESET}")
@@ -790,7 +789,7 @@ def interactive_database():
             ts = time.strftime("%Y%m%d_%H%M%S")
             def_path = f"hermes_backup_{ts}.zip"
             out = _prompt("Simpan file backup ke path", default=def_path)
-            print(f"[*] Mengunduh snapshot backup database dari server...")
+            print("[*] Mengunduh snapshot backup database dari server...")
             ok, path_or_err, bytes_sz = backup_database(output_path=out)
             if ok:
                 mb = bytes_sz / (1024 * 1024)
@@ -818,7 +817,7 @@ def interactive_database():
                 print(f"    Pesan         : {res.get('message')}")
                 print(f"    Tabel Restored: {res.get('tables_restored')}")
                 if "stats_after_restore" in res:
-                    print(f"\nStatistik Tabel Setelah Restore:")
+                    print("\nStatistik Tabel Setelah Restore:")
                     for k, v in res["stats_after_restore"].items():
                         print(f"      - {k:<20}: {v}")
             _pause()

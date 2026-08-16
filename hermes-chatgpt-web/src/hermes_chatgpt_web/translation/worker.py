@@ -16,6 +16,7 @@ from ..core.config import (
     WORKER_POLL_INTERVAL,
     get_runtime_setting,
 )
+from ..core.executor import run_in_browser_thread
 from ..core.logger import (
     log_job_retry,
     log_job_transition,
@@ -91,8 +92,8 @@ def _call_llm_sync(messages: list[dict[str, str]], model: str) -> str:
 
 
 async def _call_llm(messages: list[dict[str, str]], model: str) -> str:
-    """Async wrapper around sync gateway execution."""
-    return await asyncio.to_thread(_call_llm_sync, messages, model)
+    """Async wrapper around sync gateway execution via dedicated browser thread."""
+    return await run_in_browser_thread(_call_llm_sync, messages, model)
 
 
 async def process_job(job: dict[str, Any]):
@@ -352,9 +353,10 @@ async def worker_loop():
 
             pool_info = status.get("pool", {})
             idle_workers = pool_info.get("idle_workers", 1)
+            available_slots = idle_workers - len(active_tasks)
 
-            if idle_workers <= 0:
-                # All workers currently busy or in post-job cooldown, wait briefly
+            if available_slots <= 0:
+                # All workers currently busy or active tasks already occupy them, wait briefly
                 await asyncio.sleep(0.5)
                 continue
 
