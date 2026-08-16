@@ -1,0 +1,11 @@
+.venv
+.data
+.ruff_cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.git
+.gitignore
+tests
+*.log

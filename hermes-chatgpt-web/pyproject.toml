@@ -1,0 +1,45 @@
+[project]
+name = "hermes-chatgpt-web"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.103.2",
+    "httpx==0.28.1",
+    "playwright==1.61.0",
+    "playwright-stealth==2.0.3",
+    "uvicorn==0.23.2",
+    "aiosqlite>=0.20.0",
+    "python-multipart>=0.0.32",
+]
+
+[project.scripts]
+start = "hermes_chatgpt_web.main:main"
+dev = "hermes_chatgpt_web.scripts.dev:dev"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "RUF",   # ruff rules
+]
+ignore = [
+    "E501",   # line too long (prompts and multiline strings)
+    "RUF013", # PEP 484 implicit Optional
+    "SIM105", # Use contextlib.suppress instead of try-except-pass
+]
+

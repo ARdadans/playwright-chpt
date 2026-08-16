@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Session state - NEVER commit live browser sessions or cookies
+state.json
+storage_state.json
+session_info.json
+cookies_parsed.json
+latest.png
+pasted_session.json
+
+# OS
+.DS_Store
+
+# cookies/
+
+# Python-generated files
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+
+data-translate/
+.data/
