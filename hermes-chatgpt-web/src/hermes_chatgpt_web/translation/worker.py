@@ -16,7 +16,6 @@ from ..core.config import (
     WORKER_POLL_INTERVAL,
     get_runtime_setting,
 )
-from ..core.executor import run_in_browser_thread
 from ..core.logger import (
     log_job_retry,
     log_job_transition,
@@ -51,9 +50,9 @@ class RateLimitException(RuntimeError):
     pass
 
 
-def _call_llm_sync(messages: list[dict[str, str]], model: str) -> str:
+async def _call_llm(messages: list[dict[str, str]], model: str) -> str:
     """
-    Call the LLM through direct gateway stream generator in thread.
+    Call the LLM through direct gateway async stream generator.
     Composes a prompt from messages and collects the full response.
     """
     parts = []
@@ -68,7 +67,7 @@ def _call_llm_sync(messages: list[dict[str, str]], model: str) -> str:
     full_text = ""
     error = None
 
-    for ev in gw_chat_stream(body):
+    async for ev in gw_chat_stream(body):
         if "error" in ev:
             err = ev["error"]
             if ev.get("rate_limited") or "rate_limit" in str(err).lower() or err == "no_available_workers":
@@ -89,11 +88,6 @@ def _call_llm_sync(messages: list[dict[str, str]], model: str) -> str:
         raise RuntimeError("LLM returned empty response")
 
     return full_text
-
-
-async def _call_llm(messages: list[dict[str, str]], model: str) -> str:
-    """Async wrapper around sync gateway execution via dedicated browser thread."""
-    return await run_in_browser_thread(_call_llm_sync, messages, model)
 
 
 async def process_job(job: dict[str, Any]):

@@ -687,12 +687,12 @@ async def run_tests():
         assert parsed_dict["theme"] == "dark"
 
         # Check generation status on None page
-        status_none = check_generation_status(None)
+        status_none = await check_generation_status(None)
         assert status_none["gen"] is False
         assert status_none["sbtn_ok"] is False
 
         # Textarea detect on None page
-        assert detect_textarea(None) is None
+        assert (await detect_textarea(None)) is None
 
         # PlaywrightBrowser and ChatGPTBrowser inheritance / backward compat
         assert issubclass(ChatGPTBrowser, PlaywrightBrowser)
@@ -703,10 +703,11 @@ async def run_tests():
         from hermes_chatgpt_web.chatgpt.worker_pool import worker_pool
 
         # GET /settings
+        from hermes_chatgpt_web.core.config import DEFAULT_JOB_COOLDOWN_SECONDS
         res_settings = await client.get("/settings")
         assert res_settings.status_code == 200
         settings_data = res_settings.json()["settings"]
-        assert settings_data["job_cooldown_seconds"] == 60
+        assert settings_data["job_cooldown_seconds"] == DEFAULT_JOB_COOLDOWN_SECONDS
         assert settings_data["worker_poll_interval"] == 2.0
 
         # PATCH /settings to change cooldown to 5 seconds
@@ -725,13 +726,11 @@ async def run_tests():
         acc2 = await upsert_account_cookie(name="user_cd_2", provider="chatgpt", cookies_data="dummy2")
         acc1_id = acc1["id"]
         acc2_id = acc2["id"]
-        worker_pool.add_worker(acc1)
-        worker_pool.add_worker(acc2)
-
-
+        await worker_pool.add_worker(acc1)
+        await worker_pool.add_worker(acc2)
 
         # Execute a mock stream (job)
-        events = list(worker_pool.execute_stream(prompt="Test prompt 1"))
+        events = [ev async for ev in worker_pool.execute_stream(prompt="Test prompt 1")]
         assert len(events) >= 1
 
         # Check pool status: 1 worker should be in cooldown, 1 worker idle
@@ -770,10 +769,10 @@ async def run_tests():
         # Test single worker rule & dynamic 0s cooldown
         worker_pool.workers.clear()
         acc_single = await upsert_account_cookie(name="user_single", provider="chatgpt", cookies_data="dummy_single")
-        worker_pool.add_worker(acc_single)
+        await worker_pool.add_worker(acc_single)
 
         # 1st job with default 60s cooldown
-        list(worker_pool.execute_stream(prompt="Single worker prompt 1"))
+        _ = [ev async for ev in worker_pool.execute_stream(prompt="Single worker prompt 1")]
         assert worker_pool.acquire_idle_worker() is None  # in 60s cooldown!
         stat_single = worker_pool.get_status()
         assert stat_single["cooling_down_workers"] == 1
@@ -798,31 +797,33 @@ async def run_tests():
         # Reset settings back to defaults
         res_reset_settings = await client.post("/settings/reset")
         assert res_reset_settings.status_code == 200
-        assert res_reset_settings.json()["settings"]["job_cooldown_seconds"] == 60
+        assert res_reset_settings.json()["settings"]["job_cooldown_seconds"] == DEFAULT_JOB_COOLDOWN_SECONDS
         assert res_reset_settings.json()["settings"]["context_refresh_jobs"] == 10
 
         # 10. Test Automatic Browser Context Refresh after N completed jobs
         print("Testing Automatic Browser Context Refresh on 10 Completed Jobs threshold...")
         acc_refresh = await upsert_account_cookie(name="user_refresh_test", provider="chatgpt", cookies_data="dummy_refresh")
-        worker_pool.add_worker(acc_refresh)
+        await worker_pool.add_worker(acc_refresh)
 
         # Set threshold to 3 jobs and 0s cooldown for testing
         await client.patch("/settings", json={"context_refresh_jobs": 3, "job_cooldown_seconds": 0})
 
         # Run 1st job -> completed_jobs becomes 1
-        list(worker_pool.execute_stream(prompt="Job 1", specific_account_id=acc_refresh["id"]))
+        _ = [ev async for ev in worker_pool.execute_stream(prompt="Job 1", specific_account_id=acc_refresh["id"])]
         stat1 = worker_pool.get_status()
         w_stat = next(w for w in stat1["workers"] if w["account_id"] == acc_refresh["id"])
         assert w_stat["completed_jobs"] == 1
 
         # Run 2nd job -> completed_jobs becomes 2
-        list(worker_pool.execute_stream(prompt="Job 2", specific_account_id=acc_refresh["id"]))
+        _ = [ev async for ev in worker_pool.execute_stream(prompt="Job 2", specific_account_id=acc_refresh["id"])]
         stat2 = worker_pool.get_status()
         w_stat2 = next(w for w in stat2["workers"] if w["account_id"] == acc_refresh["id"])
         assert w_stat2["completed_jobs"] == 2
 
         # Run 3rd job -> reaches threshold of 3 -> triggers context refresh -> completed_jobs resets to 0
-        list(worker_pool.execute_stream(prompt="Job 3", specific_account_id=acc_refresh["id"]))
+        _ = [ev async for ev in worker_pool.execute_stream(prompt="Job 3", specific_account_id=acc_refresh["id"])]
+        # Allow short tick for async context refresh task to complete
+        await asyncio.sleep(0.1)
         stat3 = worker_pool.get_status()
         w_stat3 = next(w for w in stat3["workers"] if w["account_id"] == acc_refresh["id"])
         assert w_stat3["completed_jobs"] == 0
@@ -836,10 +837,10 @@ async def run_tests():
         await client.post("/settings/reset")
 
         # Clean up test workers
-        worker_pool.remove_worker(acc1_id)
-        worker_pool.remove_worker(acc2_id)
-        worker_pool.remove_worker(acc_single["id"])
-        worker_pool.remove_worker(acc_refresh["id"])
+        await worker_pool.remove_worker(acc1_id)
+        await worker_pool.remove_worker(acc2_id)
+        await worker_pool.remove_worker(acc_single["id"])
+        await worker_pool.remove_worker(acc_refresh["id"])
 
 
 

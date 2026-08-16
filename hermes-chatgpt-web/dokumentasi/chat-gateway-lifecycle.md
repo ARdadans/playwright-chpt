@@ -8,10 +8,11 @@ Dokumen ini menjelaskan alur kerja internal aplikasi Hermes ChatGPT Web dalam me
 
 | Komponen | Lokasi File | Peran Utama |
 | :--- | :--- | :--- |
-| **Browser Core** | `src/hermes_chatgpt_web/core/browser.py` | Menginisialisasi Chromium via Playwright dengan *persistent context*, injeksi *cookies/localStorage*, dan *stealth evasion* anti-bot. |
-| **Chat Engine** | `src/hermes_chatgpt_web/gateway/chat.py` | Mengontrol interaksi langsung dengan UI ChatGPT web (input teks, klik tombol, pembacaan DOM, polling streaming). |
-| **Gateway Server** | `src/hermes_chatgpt_web/gateway/server.py` | Server HTTP internal untuk mengeksekusi stream chat dan memonitor status browser/watchdog. |
-| **API Adapter** | `src/hermes_chatgpt_web/api/routes.py` | Menyediakan endpoint `/v1/chat/completions` yang kompatibel dengan format standar OpenAI API. |
+| **Browser Core** | `src/hermes_chatgpt_web/core/browser.py` | Menginisialisasi Chromium async Playwright, mengelola isolasi `BrowserContext` dan `Page` per akun, injeksi *cookies/localStorage*, dan *stealth evasion*. |
+| **Worker Pool** | `src/hermes_chatgpt_web/chatgpt/worker_pool.py` | Mengelola lifecycle akun worker ChatGPT, antrean lock per-akun (`worker.lock`), deteksi limit kuota, dan round-robin dispatch. |
+| **Chat Engine** | `src/hermes_chatgpt_web/chatgpt/chat.py` | Mengontrol interaksi langsung dengan UI ChatGPT web (input teks, klik tombol, pembacaan DOM, polling streaming delta). |
+| **In-Process Gateway**| `src/hermes_chatgpt_web/api/gateway_client.py` | Gateway async in-process untuk memanggil engine chat tanpa latency network/sub-process. |
+| **API Adapter** | `src/hermes_chatgpt_web/api/routes.py` | Menyediakan endpoint `/v1/chat/completions`, `/settings`, `/cookies`, `/database` yang terpadu dalam satu aplikasi FastAPI. |
 
 ---
 

@@ -9,7 +9,7 @@ import asyncio
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from typing import Any
 
 from ..core.config import get_context_refresh_jobs, get_job_cooldown_seconds
@@ -62,7 +62,7 @@ class AccountWorker:
         self.title: str = "ChatGPT"
         self.ok: bool = True
         self.error: str | None = None
-        self.lock = threading.Lock()
+        self.lock = asyncio.Lock()
 
     def is_cooling_down(self) -> bool:
         """Check if worker is currently in post-job cooldown period."""
@@ -98,10 +98,9 @@ class AccountWorker:
         }
 
 
-
 class WorkerPool:
     """
-    Central pool managing multiple isolated account workers.
+    Central pool managing multiple isolated account workers asynchronously.
     """
 
     def __init__(self):
@@ -109,57 +108,59 @@ class WorkerPool:
         self.workers: dict[str, AccountWorker] = {}
         self._pool_lock = threading.Lock()
         self._initialized = False
+        self._background_tasks: set[asyncio.Task] = set()
 
-    def init_pool(self, browser: Any, accounts: list[dict[str, Any]], headless: bool = False):
+    async def init_pool(self, browser: Any, accounts: list[dict[str, Any]], headless: bool = False):
         """Initialize browser contexts for all provided active accounts."""
-        with self._pool_lock:
-            self.browser = browser
-            skip_browser = os.environ.get("HERMES_SKIP_BROWSER") == "1"
+        self.browser = browser
+        skip_browser = os.environ.get("HERMES_SKIP_BROWSER") == "1"
 
-            for acc in accounts:
-                if acc.get("status") not in ("ACTIVE", "BUSY"):
-                    continue
-                acc_id = acc["id"]
-                name = acc["name"]
-                provider = acc.get("provider", "chatgpt")
-                cookies = acc.get("cookies_data")
+        for acc in accounts:
+            if acc.get("status") not in ("ACTIVE", "BUSY"):
+                continue
+            acc_id = acc["id"]
+            name = acc["name"]
+            provider = acc.get("provider", "chatgpt")
+            cookies = acc.get("cookies_data")
 
-                if skip_browser:
-                    # Mock worker for tests
-                    worker = AccountWorker(acc_id, name, provider, context=None, page=None, cookies=cookies)
-                    worker.title = "ChatGPT (Mock)"
+            if skip_browser or not browser:
+                # Mock worker for tests
+                worker = AccountWorker(acc_id, name, provider, context=None, page=None, cookies=cookies)
+                worker.title = "ChatGPT (Mock)"
+                with self._pool_lock:
                     self.workers[acc_id] = worker
-                    log_browser(f"Worker [{name}] initialized (Mock)")
-                    continue
+                log_browser(f"Worker [{name}] initialized (Mock)")
+                continue
 
-                try:
-                    ctx, page = self.browser.create_account_context(acc_id, cookies)
-                    worker = AccountWorker(acc_id, name, provider, ctx, page, cookies=cookies)
-                    self._prepare_page(worker)
+            try:
+                ctx, page = await self.browser.create_account_context(acc_id, cookies)
+                worker = AccountWorker(acc_id, name, provider, ctx, page, cookies=cookies)
+                await self._prepare_page(worker)
+                with self._pool_lock:
                     self.workers[acc_id] = worker
-                    log_browser(f"Worker [{name}] ready — title: \"{worker.title}\"")
-                except Exception as e:
-                    log_browser(f"Failed to initialize worker [{name}]: {e}", level="ERROR")
+                log_browser(f"Worker [{name}] ready — title: \"{worker.title}\"")
+            except Exception as e:
+                log_browser(f"Failed to initialize worker [{name}]: {e}", level="ERROR")
 
-            self._initialized = True
+        self._initialized = True
 
-    def _prepare_page(self, worker: AccountWorker):
+    async def _prepare_page(self, worker: AccountWorker):
         """Navigate and prepare ChatGPT page for a worker with reload fallback and validation."""
         if not worker.page:
             return
         page = worker.page
         log_browser(f"Navigating worker [{worker.name}] to ChatGPT...")
         try:
-            page.goto(CHATGPT_URL, wait_until="domcontentloaded", timeout=120000)
+            await page.goto(CHATGPT_URL, wait_until="domcontentloaded", timeout=120000)
         except Exception as e:
             log_browser(f"Worker [{worker.name}] navigation warning: {e}", level="WARN")
 
         # Settle Cloudflare / challenges
         t0 = time.time()
         while time.time() - t0 < 45:
-            time.sleep(1.5)
+            await asyncio.sleep(1.5)
             try:
-                cur = (page.title() or "").strip()
+                cur = ((await page.title()) or "").strip()
             except Exception:
                 cur = ""
             if cur and "just a moment" not in cur.lower() and "security" not in cur.lower():
@@ -167,14 +168,14 @@ class WorkerPool:
 
         # Dismiss any popup/onboarding modal
         try:
-            dismiss_modals(page)
+            await dismiss_modals(page)
         except Exception:
             pass
 
         # Check if textarea is ready
         ta_ready = False
         try:
-            page.wait_for_selector(TEXTAREA_SELECTOR, state="visible", timeout=15000)
+            await page.wait_for_selector(TEXTAREA_SELECTOR, state="visible", timeout=15000)
             ta_ready = True
         except Exception:
             log_browser(
@@ -185,13 +186,13 @@ class WorkerPool:
         # Fallback: 1x reload if not ready
         if not ta_ready:
             try:
-                page.reload(wait_until="domcontentloaded", timeout=60000)
-                time.sleep(2)
+                await page.reload(wait_until="domcontentloaded", timeout=60000)
+                await asyncio.sleep(2)
                 try:
-                    dismiss_modals(page)
+                    await dismiss_modals(page)
                 except Exception:
                     pass
-                page.wait_for_selector(TEXTAREA_SELECTOR, state="visible", timeout=20000)
+                await page.wait_for_selector(TEXTAREA_SELECTOR, state="visible", timeout=20000)
                 ta_ready = True
             except Exception as e:
                 log_browser(
@@ -202,65 +203,65 @@ class WorkerPool:
                 worker.error = f"Textarea not ready: {e}"
                 return
 
-        worker.title = (page.title() or "ChatGPT").strip()
-        detect_textarea(page)
-        time.sleep(1.5)  # Buffer for client-side React hydration settling
+        worker.title = ((await page.title()) or "ChatGPT").strip()
+        await detect_textarea(page)
+        await asyncio.sleep(1.5)  # Buffer for client-side React hydration settling
         worker.ok = True
         worker.error = None
         worker.last_activity = time.time()
 
-    def add_worker(self, account: dict[str, Any]) -> bool:
+    async def add_worker(self, account: dict[str, Any]) -> bool:
         """Dynamically add and boot a new account worker into the pool."""
-        with self._pool_lock:
-            acc_id = account["id"]
-            name = account["name"]
-            provider = account.get("provider", "chatgpt")
-            cookies = account.get("cookies_data")
+        acc_id = account["id"]
+        name = account["name"]
+        provider = account.get("provider", "chatgpt")
+        cookies = account.get("cookies_data")
 
-            # If worker already exists, remove first
-            if acc_id in self.workers:
-                self._remove_worker_locked(acc_id)
+        # If worker already exists, remove first
+        if acc_id in self.workers:
+            await self._remove_worker_locked(acc_id)
 
-            skip_browser = os.environ.get("HERMES_SKIP_BROWSER") == "1"
-            if skip_browser or not self.browser:
-                worker = AccountWorker(acc_id, name, provider, None, None, cookies=cookies)
-                worker.title = "ChatGPT (Mock)"
+        skip_browser = os.environ.get("HERMES_SKIP_BROWSER") == "1"
+        if skip_browser or not self.browser:
+            worker = AccountWorker(acc_id, name, provider, None, None, cookies=cookies)
+            worker.title = "ChatGPT (Mock)"
+            with self._pool_lock:
                 self.workers[acc_id] = worker
-                return True
+            return True
 
-            try:
-                ctx, page = self.browser.create_account_context(acc_id, cookies)
-                worker = AccountWorker(acc_id, name, provider, ctx, page, cookies=cookies)
-                self._prepare_page(worker)
+        try:
+            ctx, page = await self.browser.create_account_context(acc_id, cookies)
+            worker = AccountWorker(acc_id, name, provider, ctx, page, cookies=cookies)
+            await self._prepare_page(worker)
+            with self._pool_lock:
                 self.workers[acc_id] = worker
-                return True
-            except Exception as e:
-                log_browser(f"Failed to add worker [{name}]: {e}", level="ERROR")
-                return False
+            return True
+        except Exception as e:
+            log_browser(f"Failed to add worker [{name}]: {e}", level="ERROR")
+            return False
 
-    def remove_worker(self, account_id: str):
+    async def remove_worker(self, account_id: str):
         """Remove and clean up a worker context."""
-        with self._pool_lock:
-            self._remove_worker_locked(account_id)
+        await self._remove_worker_locked(account_id)
 
-    def _remove_worker_locked(self, account_id: str):
-        worker = self.workers.pop(account_id, None)
+    async def _remove_worker_locked(self, account_id: str):
+        with self._pool_lock:
+            worker = self.workers.pop(account_id, None)
         if worker and self.browser:
             try:
-                self.browser.close_account_context(account_id)
+                await self.browser.close_account_context(account_id)
             except Exception:
                 pass
 
-    def refresh_worker_context(self, worker: AccountWorker) -> bool:
+    async def refresh_worker_context(self, worker: AccountWorker) -> bool:
         """
         Close and recreate an isolated BrowserContext + Page for this worker,
         clearing memory/cache leaks and re-injecting fresh session cookies.
         """
-        with self._pool_lock:
-            return self._refresh_worker_locked(worker)
+        return await self._refresh_worker_locked(worker)
 
-    def _refresh_worker_locked(self, worker: AccountWorker) -> bool:
-        """Internal context refresh implementation while lock is held."""
+    async def _refresh_worker_locked(self, worker: AccountWorker) -> bool:
+        """Internal context refresh implementation."""
         skip_browser = os.environ.get("HERMES_SKIP_BROWSER") == "1"
         threshold = get_context_refresh_jobs()
         if threshold > 0 and worker.completed_jobs >= threshold:
@@ -276,11 +277,11 @@ class WorkerPool:
 
         if not skip_browser and self.browser:
             try:
-                self.browser.close_account_context(worker.account_id)
-                ctx, page = self.browser.create_account_context(worker.account_id, worker.cookies)
+                await self.browser.close_account_context(worker.account_id)
+                ctx, page = await self.browser.create_account_context(worker.account_id, worker.cookies)
                 worker.context = ctx
                 worker.page = page
-                self._prepare_page(worker)
+                await self._prepare_page(worker)
                 worker.ok = True
                 worker.error = None
                 log_browser(f"Worker [{worker.name}] browser context refreshed and ready (memory cleared).")
@@ -295,13 +296,12 @@ class WorkerPool:
         worker.completed_jobs = 0
         return True
 
-    def refresh_worker(self, account_id: str) -> bool:
+    async def refresh_worker(self, account_id: str) -> bool:
         """Manually trigger a context refresh for a specific worker by account_id."""
-        with self._pool_lock:
-            worker = self.workers.get(account_id)
-            if not worker:
-                return False
-            return self._refresh_worker_locked(worker)
+        worker = self.workers.get(account_id)
+        if not worker:
+            return False
+        return await self._refresh_worker_locked(worker)
 
     def acquire_idle_worker(self, specific_account_id: str | None = None) -> AccountWorker | None:
         """
@@ -332,7 +332,9 @@ class WorkerPool:
         """Release a locked worker back to idle state, check context refresh threshold, and apply post-job cooldown."""
         threshold = get_context_refresh_jobs()
         if threshold > 0 and worker.completed_jobs >= threshold:
-            self._refresh_worker_locked(worker)
+            t = asyncio.create_task(self._refresh_worker_locked(worker))
+            self._background_tasks.add(t)
+            t.add_done_callback(self._background_tasks.discard)
 
         worker.busy = False
         worker.busy_since = None
@@ -391,16 +393,15 @@ class WorkerPool:
                 "workers": workers_info,
             }
 
-
-    def execute_stream(
+    async def execute_stream(
         self,
         prompt: str,
         model: str = "auto",
         reset: bool = False,
         specific_account_id: str | None = None,
-    ) -> Iterator[dict[str, Any]]:
+    ) -> AsyncIterator[dict[str, Any]]:
         """
-        Stream ChatGPT tokens using an acquired worker.
+        Stream ChatGPT tokens asynchronously using an acquired worker.
         Detects rate limit and triggers staged cooldown if encountered.
         """
         worker = self.acquire_idle_worker(specific_account_id)
@@ -421,7 +422,7 @@ class WorkerPool:
                 yield {"done": True, "text": full_text}
                 return
 
-            for ev in _cg_ask_stream(
+            async for ev in _cg_ask_stream(
                 worker.page,
                 prompt,
                 model=model,
@@ -462,12 +463,11 @@ class WorkerPool:
                     f"Rate limit detected on worker [{worker.name}] (id: {worker.account_id}). Triggering cooldown.",
                     level="WARN",
                 )
-                # Apply staged cooldown in background thread/sync
                 try:
-                    asyncio.run(set_account_cooldown(worker.account_id, "Rate limit exceeded"))
+                    await set_account_cooldown(worker.account_id, "Rate limit exceeded")
                 except Exception:
                     pass
-                self.remove_worker(worker.account_id)
+                await self.remove_worker(worker.account_id)
             else:
                 worker.turns += 1
                 worker.completed_jobs += 1

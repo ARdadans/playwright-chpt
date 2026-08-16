@@ -52,16 +52,16 @@ def load_cookie_file(file_path: str | Path) -> list[dict[str, str]] | list[list[
     return []
 
 
-def inject_chatgpt_cookies(context: Any, cookie_pairs: list) -> int:
+async def inject_chatgpt_cookies(context: Any, cookie_pairs: list) -> int:
     """
     Accepts cookie_pairs as list of (name, value) tuples/lists or list of dicts.
-    Adds them across chatgpt/openai domains into the Playwright browser context.
+    Adds them across chatgpt/openai domains into the Playwright async browser context.
     Returns the number of cookie assignments made.
     """
     if not context:
         return 0
 
-    added = 0
+    cookies_to_add = []
     for item in cookie_pairs:
         if isinstance(item, dict):
             name = item.get("name")
@@ -77,20 +77,20 @@ def inject_chatgpt_cookies(context: Any, cookie_pairs: list) -> int:
         secure = name in SECURE_COOKIES or "__Secure" in name or "_dd_s" in name
         dms = ["chatgpt.com"] if name in HOST_ONLY_COOKIES else COOKIE_DOMAINS
         for dm in dms:
-            try:
-                context.add_cookies(
-                    [
-                        {
-                            "name": name,
-                            "value": str(value),
-                            "domain": dm,
-                            "path": "/",
-                            "secure": secure,
-                            "sameSite": "Lax",
-                        }
-                    ]
-                )
-                added += 1
-            except Exception:
-                pass
-    return added
+            cookies_to_add.append(
+                {
+                    "name": name,
+                    "value": str(value),
+                    "domain": dm,
+                    "path": "/",
+                    "secure": secure,
+                    "sameSite": "Lax",
+                }
+            )
+    if cookies_to_add:
+        try:
+            await context.add_cookies(cookies_to_add)
+            return len(cookies_to_add)
+        except Exception:
+            pass
+    return 0

@@ -9,7 +9,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from ..chatgpt.config import MODELS as _MODELS
 from ..chatgpt.worker_pool import worker_pool
 from ..core.config import INTERNAL_KEY, is_no_login
-from ..core.executor import iterate_in_browser_thread, run_in_browser_thread
 from ..core.logger import log_session
 from ..gateway.state import shared_state
 from ..translation.database import (
@@ -117,7 +116,7 @@ async def add_cookie(request: Request):
 
     acc = await upsert_account_cookie(name=name, provider=provider, cookies_data=raw_cookies)
     if acc.get("status") in ("ACTIVE", "BUSY"):
-        await run_in_browser_thread(worker_pool.add_worker, acc)
+        await worker_pool.add_worker(acc)
 
     return {"ok": True, "message": "Cookie account saved successfully", "account": acc}
 
@@ -130,7 +129,7 @@ async def delete_cookie(account_id: str):
     if not acc:
         raise HTTPException(status_code=404, detail=f"Account with ID '{account_id}' not found")
 
-    worker_pool.remove_worker(account_id)
+    await worker_pool.remove_worker(account_id)
     await delete_account_cookie(account_id)
     return {"ok": True, "message": f"Account '{acc['name']}' deleted successfully"}
 
@@ -143,7 +142,7 @@ async def pause_cookie(account_id: str):
     if not acc:
         raise HTTPException(status_code=404, detail=f"Account with ID '{account_id}' not found")
 
-    worker_pool.remove_worker(account_id)
+    await worker_pool.remove_worker(account_id)
     return {"ok": True, "message": f"Account '{acc['name']}' paused", "account": acc}
 
 
@@ -155,7 +154,7 @@ async def resume_cookie(account_id: str):
     if not acc:
         raise HTTPException(status_code=404, detail=f"Account with ID '{account_id}' not found")
 
-    await run_in_browser_thread(worker_pool.add_worker, acc)
+    await worker_pool.add_worker(acc)
     return {"ok": True, "message": f"Account '{acc['name']}' resumed", "account": acc}
 
 
@@ -168,7 +167,7 @@ async def reset_cookie_cooldown(account_id: str):
         raise HTTPException(status_code=404, detail=f"Account with ID '{account_id}' not found")
 
     worker_pool.reset_worker_cooldown(account_id)
-    await run_in_browser_thread(worker_pool.add_worker, acc)
+    await worker_pool.add_worker(acc)
     return {"ok": True, "message": f"Cooldown reset for '{acc['name']}'", "account": acc}
 
 
@@ -180,10 +179,9 @@ async def refresh_account_context(account_id: str):
     if not acc:
         raise HTTPException(status_code=404, detail=f"Account with ID '{account_id}' not found")
 
-    refreshed = await run_in_browser_thread(worker_pool.refresh_worker, account_id)
+    refreshed = await worker_pool.refresh_worker(account_id)
     if not refreshed:
-        # If not present in pool, try adding
-        refreshed = await run_in_browser_thread(worker_pool.add_worker, acc)
+        refreshed = await worker_pool.add_worker(acc)
 
     return {"ok": refreshed, "message": f"Browser context refreshed for account '{acc['name']}'"}
 
@@ -266,7 +264,6 @@ async def reset_system_settings():
     }
 
 
-
 @router.post("/cookies/inject-session")
 async def inject_session(request: Request):
     """
@@ -293,7 +290,7 @@ async def inject_session(request: Request):
         )
 
     acc = await upsert_account_cookie(name=name, provider=provider, cookies_data=raw_cookies)
-    await run_in_browser_thread(worker_pool.add_worker, acc)
+    await worker_pool.add_worker(acc)
 
     return {"ok": True, "message": "Session injected successfully", "account": acc}
 
@@ -337,7 +334,6 @@ async def chat_completions(request: Request):
         and prompt.startswith(_prev_prompt)
         and len(prompt) > len(_prev_prompt)
     ):
-
         gw_body = {"prompt": prompt[len(_prev_prompt) :], "model": model, "reset": False}
     else:
         gw_body = {"prompt": prompt, "model": model, "reset": True}
@@ -355,7 +351,7 @@ async def chat_completions(request: Request):
     if stream:
         async def sse_gen():
             try:
-                async for ev in iterate_in_browser_thread(gw_chat_stream, gw_body):
+                async for ev in gw_chat_stream(gw_body):
                     if ev.get("error"):
                         yield f"data: {json.dumps({'error': {'message': ev['error'], 'type': 'backend_error'}}, ensure_ascii=False)}\n\n"
                         yield "data: [DONE]\n\n"
@@ -370,7 +366,7 @@ async def chat_completions(request: Request):
         return StreamingResponse(sse_gen(), media_type="text/event-stream")
 
     # Non-streaming
-    res = await run_in_browser_thread(gw_chat_sync, gw_body)
+    res = await gw_chat_sync(gw_body)
     if "error" in res:
         return JSONResponse(
             {"error": {"message": res["error"], "type": "backend_error"}},
@@ -410,7 +406,7 @@ async def internal_debug(request: Request, x_internal_key: str | None = Header(N
     browser = shared_state.get("browser")
     if not browser:
         return {"ok": False, "error": "browser not running"}
-    info = await run_in_browser_thread(browser.get_debug_info)
+    info = await browser.get_debug_info()
     return {"ok": shared_state.get("ok", False), "info": info}
 
 
@@ -427,7 +423,7 @@ async def internal_chat(
             {"error": "BROWSER_NOT_READY", "message": shared_state.get("error") or "gateway not booted"},
             status_code=503,
         )
-    res = await run_in_browser_thread(gw_chat_sync, body)
+    res = await gw_chat_sync(body)
     if "error" in res:
         return JSONResponse({"error": res["error"]}, status_code=500)
     return res
@@ -449,7 +445,7 @@ async def internal_chat_stream(
 
     async def event_gen():
         try:
-            async for ev in iterate_in_browser_thread(gw_chat_stream, body):
+            async for ev in gw_chat_stream(body):
                 yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"

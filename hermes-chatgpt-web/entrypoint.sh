@@ -12,10 +12,10 @@ rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 # Start Xvfb if not already running on display :99
 if ! xdpyinfo -display :99 >/dev/null 2>&1; then
   echo "[ENTRYPOINT] Starting Xvfb on display :99..."
-  Xvfb :99 -screen 0 1280x900x24 -nolisten tcp -ac >/tmp/xvfb99.log 2>&1 &
+  Xvfb :99 -screen 0 1280x900x24 -nolisten tcp -ac +extension GLX +render -noreset >/tmp/xvfb99.log 2>&1 &
   
   # Wait for Xvfb to be ready
-  for i in $(seq 1 25); do
+  for i in $(seq 1 30); do
     if xdpyinfo -display :99 >/dev/null 2>&1; then
       echo "[ENTRYPOINT] Xvfb is ready on :99."
       break

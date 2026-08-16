@@ -1,5 +1,6 @@
+import asyncio
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from typing import Any
 
 from ..chatgpt.worker_pool import worker_pool
@@ -26,19 +27,20 @@ def gw_status() -> dict[str, Any]:
     return base_stat
 
 
-def gw_chat_stream(body: dict[str, Any], account_id: str | None = None) -> Iterator[dict[str, Any]]:
-    """Direct generator for chat stream tokens via WorkerPool."""
+async def gw_chat_stream(body: dict[str, Any], account_id: str | None = None) -> AsyncIterator[dict[str, Any]]:
+    """Direct async generator for chat stream tokens via WorkerPool."""
     prompt = body.get("prompt", "")
     model = body.get("model", "auto")
     reset = bool(body.get("reset", False))
 
     if worker_pool.workers:
-        yield from worker_pool.execute_stream(
+        async for ev in worker_pool.execute_stream(
             prompt=prompt,
             model=model,
             reset=reset,
             specific_account_id=account_id,
-        )
+        ):
+            yield ev
         return
 
     # Fallback to shared_state single page
@@ -46,15 +48,16 @@ def gw_chat_stream(body: dict[str, Any], account_id: str | None = None) -> Itera
     if not page or not shared_state.get("ok"):
         yield {"error": shared_state.get("error") or "gateway not booted"}
         return
-    yield from ask_stream(page, prompt, model, reset=reset)
+    async for ev in ask_stream(page, prompt, model, reset=reset):
+        yield ev
 
 
-def gw_chat_sync(body: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:
-    """Synchronous chat completion via direct function call."""
+async def gw_chat_sync(body: dict[str, Any], account_id: str | None = None) -> dict[str, Any]:
+    """Asynchronous chat completion via direct function call."""
     out = ""
     error = None
     rate_limited = False
-    for ev in gw_chat_stream(body, account_id=account_id):
+    async for ev in gw_chat_stream(body, account_id=account_id):
         if "error" in ev:
             error = ev["error"]
             if ev.get("rate_limited"):
@@ -73,15 +76,15 @@ def gw_chat_sync(body: dict[str, Any], account_id: str | None = None) -> dict[st
     return {"text": out}
 
 
-def heal_gateway() -> bool:
+async def heal_gateway() -> bool:
     """Best effort heal if page went into bad state."""
     page = shared_state.get("page")
     if not page:
         return False
     try:
-        page.reload(wait_until="domcontentloaded", timeout=30000)
-        time.sleep(3)
-        shared_state["title"] = page.title() or ""
+        await page.reload(wait_until="domcontentloaded", timeout=30000)
+        await asyncio.sleep(3)
+        shared_state["title"] = (await page.title()) or ""
         shared_state["ok"] = True
         return True
     except Exception as e:

@@ -11,7 +11,6 @@ from fastapi import FastAPI
 from ..chatgpt.worker_pool import worker_pool
 from ..core.browser import PlaywrightBrowser
 from ..core.config import ADAPTER_PORT
-from ..core.executor import run_in_browser_thread
 from ..core.logger import (
     log_browser,
     log_db,
@@ -64,13 +63,13 @@ async def _scan_and_import_cookies():
         log_db(f"Synchronized {imported_count} cookie accounts from {cookie_dir}")
 
 
-def _boot_browser_pool_sync(headless: bool, accounts: list[dict]):
-    """Synchronous initialization of Playwright browser and multi-account pool."""
-    b = PlaywrightBrowser().start(headless=headless)
+async def _boot_browser_pool(headless: bool, accounts: list[dict]):
+    """Asynchronous initialization of Playwright browser and multi-account pool."""
+    b = await PlaywrightBrowser().start(headless=headless)
     shared_state["browser"] = b
     log_browser(f"Chromium launched (headless={str(headless).lower()})")
 
-    worker_pool.init_pool(b, accounts, headless=headless)
+    await worker_pool.init_pool(b, accounts, headless=headless)
     shared_state["ok"] = True
     shared_state["last_activity"] = time.time()
     shared_state["title"] = "ChatGPT Multi-Account Pool"
@@ -112,12 +111,12 @@ async def lifespan(app: FastAPI):
         log_startup(f"Launching Playwright browser with {len(active_accounts)} active worker contexts...")
         try:
             headless = os.environ.get("HERMES_HEADLESS", "0").lower() in ("1", "true")
-            await run_in_browser_thread(_boot_browser_pool_sync, headless, active_accounts)
+            await _boot_browser_pool(headless, active_accounts)
         except Exception as e:
             log_error(f"Browser launch failed: {e}")
             sys.exit(1)
     else:
-        worker_pool.init_pool(None, active_accounts, headless=False)
+        await worker_pool.init_pool(None, active_accounts, headless=False)
         shared_state["ok"] = True
         shared_state["title"] = "ChatGPT (Mock Pool)"
         log_browser(f"Mock browser pool ready with {len(active_accounts)} accounts (HERMES_SKIP_BROWSER=1)")
@@ -142,7 +141,7 @@ async def lifespan(app: FastAPI):
 
     browser = shared_state.get("browser")
     if browser:
-        await run_in_browser_thread(browser.stop)
+        await browser.stop()
     log_server("Shutdown completed")
 
 

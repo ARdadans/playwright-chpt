@@ -2,7 +2,7 @@ import json
 import os
 from typing import Any
 
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 
 from .config import BASE_DIR, TIMEZONE
 
@@ -25,7 +25,7 @@ window.chrome = {runtime: {}};
 
 class PlaywrightBrowser:
     """
-    Generic Playwright browser automation manager.
+    Generic Async Playwright browser automation manager.
     Handles Chromium lifecycle, stealth initialization, multi-context management,
     page evaluation, screenshots, and cookie management.
     """
@@ -40,38 +40,42 @@ class PlaywrightBrowser:
         self.page = None
         self.contexts: dict[str, dict[str, Any]] = {}
 
-    def start(self, headless: bool = False, user_data_dir: str | None = None, launch_args: list[str] | None = None):
+    async def start(self, headless: bool = False, user_data_dir: str | None = None, launch_args: list[str] | None = None):
         if "DISPLAY" not in os.environ:
             os.environ["DISPLAY"] = self.display
         args = launch_args or LAUNCH_ARGS
 
-        self.playwright = sync_playwright().start()
-        self.browser = self.playwright.chromium.launch(
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(
             headless=headless,
             args=args,
         )
         return self
 
-    def create_account_context(self, account_id: str, cookies: list | dict | str | None = None) -> tuple[Any, Any]:
+    async def create_account_context(self, account_id: str, cookies: list | dict | str | None = None) -> tuple[Any, Any]:
         """Create an isolated BrowserContext + Page for a specific account."""
         if not self.browser:
             raise RuntimeError("Browser not started")
 
         if account_id in self.contexts:
-            self.close_account_context(account_id)
+            await self.close_account_context(account_id)
 
-        ctx = self.browser.new_context(
+        ctx = await self.browser.new_context(
             viewport={"width": 1280, "height": 800},
             locale="en-US",
             timezone_id=self.timezone_id,
         )
-        page = ctx.new_page()
+        page = await ctx.new_page()
         if self.stealth:
-            page.add_init_script(STEALTH)
+            await page.add_init_script(STEALTH)
             try:
                 from playwright_stealth import Stealth
 
-                Stealth().apply_stealth_sync(page)
+                s = Stealth()
+                if hasattr(s, "apply_stealth_async"):
+                    await s.apply_stealth_async(page)
+                elif hasattr(s, "apply_stealth_sync"):
+                    s.apply_stealth_sync(page)
             except Exception:
                 pass
 
@@ -104,7 +108,7 @@ class PlaywrightBrowser:
             if cookie_list:
                 from ..chatgpt.cookies import inject_chatgpt_cookies
 
-                inject_chatgpt_cookies(ctx, cookie_list)
+                await inject_chatgpt_cookies(ctx, cookie_list)
 
         self.contexts[account_id] = {"context": ctx, "page": page}
 
@@ -114,14 +118,14 @@ class PlaywrightBrowser:
 
         return ctx, page
 
-    def close_account_context(self, account_id: str):
+    async def close_account_context(self, account_id: str):
         """Close context and clean up memory for specific account."""
         entry = self.contexts.pop(account_id, None)
         if entry:
             ctx = entry.get("context")
             if ctx:
                 try:
-                    ctx.close()
+                    await ctx.close()
                 except Exception:
                     pass
             if self.context == ctx:
@@ -133,53 +137,53 @@ class PlaywrightBrowser:
                     self.context = None
                     self.page = None
 
-    def shot(self, path: str | None = None) -> str | None:
+    async def shot(self, path: str | None = None) -> str | None:
         if not self.page:
             return None
         path = path or os.path.join(BASE_DIR, "latest.png")
-        self.page.screenshot(path=path)
+        await self.page.screenshot(path=path)
         return path
 
     def current(self) -> str:
         return self.page.url if self.page else ""
 
-    def eval(self, js: str) -> Any:
-        return self.page.evaluate(js) if self.page else None
+    async def eval(self, js: str) -> Any:
+        return await self.page.evaluate(js) if self.page else None
 
-    def localStorage(self) -> str | None:
-        return self.eval(
+    async def localStorage(self) -> str | None:
+        return await self.eval(
             "JSON.stringify(Object.fromEntries(Object.keys(localStorage).map(k => [k, localStorage.getItem(k)])))"
         )
 
-    def add_cookies(self, cookies: list[dict]) -> None:
+    async def add_cookies(self, cookies: list[dict]) -> None:
         if self.context and cookies:
-            self.context.add_cookies(cookies)
+            await self.context.add_cookies(cookies)
 
-    def clear_cookies(self) -> None:
+    async def clear_cookies(self) -> None:
         if self.context:
-            self.context.clear_cookies()
+            await self.context.clear_cookies()
 
-    def stop(self):
+    async def stop(self):
         for _acc_id, entry in list(self.contexts.items()):
             try:
                 if entry.get("context"):
-                    entry["context"].close()
+                    await entry["context"].close()
             except Exception:
                 pass
         self.contexts.clear()
         try:
             if self.context:
-                self.context.close()
+                await self.context.close()
         except Exception:
             pass
         try:
             if self.browser:
-                self.browser.close()
+                await self.browser.close()
         except Exception:
             pass
         try:
             if self.playwright:
-                self.playwright.stop()
+                await self.playwright.stop()
         except Exception:
             pass
         self.browser = None

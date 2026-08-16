@@ -10,14 +10,14 @@ from .config import (
 )
 
 
-def detect_textarea(page: Any) -> dict | None:
+async def detect_textarea(page: Any) -> dict | None:
     """Check if #prompt-textarea is visible and return bounding box rect {x, y, w, h}."""
     if not page:
         return None
     try:
         ta = page.locator(TEXTAREA_SELECTOR).first
-        if ta and ta.is_visible():
-            box = ta.bounding_box()
+        if ta and await ta.is_visible():
+            box = await ta.bounding_box()
             if box:
                 return {
                     "x": int(box["x"]),
@@ -30,7 +30,7 @@ def detect_textarea(page: Any) -> dict | None:
     return None
 
 
-def get_debug_info(page: Any) -> dict:
+async def get_debug_info(page: Any) -> dict:
     """DOM debug info matching PRD 5.10 /_internal/debug."""
     if not page:
         return {"error": "no active page"}
@@ -53,13 +53,13 @@ def get_debug_info(page: Any) -> dict:
                 body: (document.body.innerText || '').slice(0, 250)
             });
         })()"""
-        info_str = page.evaluate(js)
+        info_str = await page.evaluate(js)
         return json.loads(info_str or "{}")
     except Exception as e:
         return {"debug_error": str(e)}
 
 
-def check_generation_status(page: Any) -> dict:
+async def check_generation_status(page: Any) -> dict:
     """
     Check if ChatGPT is actively generating / paused / idle.
     Returns {cur, turns, gen (bool), sbtn_ok (bool)}.
@@ -67,7 +67,7 @@ def check_generation_status(page: Any) -> dict:
     if not page:
         return {"cur": "", "turns": 0, "gen": False, "sbtn_ok": False}
     try:
-        snap = page.evaluate(
+        snap = await page.evaluate(
             """JSON.stringify((() => {
                 const els = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
                 const spb = document.querySelector('[data-testid="stop-button"]');
@@ -85,7 +85,7 @@ def check_generation_status(page: Any) -> dict:
         return {"cur": "", "turns": 0, "gen": False, "sbtn_ok": False}
 
 
-def dismiss_modals(page: Any) -> bool:
+async def dismiss_modals(page: Any) -> bool:
     """Dismiss any modal dialogs, popups, or 'Stay logged out' prompts."""
     if not page:
         return False
@@ -94,8 +94,8 @@ def dismiss_modals(page: Any) -> bool:
         for sel in MODAL_DISMISS_SELECTORS:
             try:
                 btn = page.locator(sel).first
-                if btn.count() and btn.is_visible():
-                    btn.click(timeout=2000)
+                if (await btn.count()) and (await btn.is_visible()):
+                    await btn.click(timeout=2000)
                     dismissed = True
                     break
             except Exception:
@@ -105,12 +105,12 @@ def dismiss_modals(page: Any) -> bool:
     return dismissed
 
 
-def save_chatgpt_state(context: Any, page: Any, state_file: str = STATE_FILE) -> dict:
+async def save_chatgpt_state(context: Any, page: Any, state_file: str = STATE_FILE) -> dict:
     """Snapshot web token + cookies usable by the adapter."""
     if not page or not context:
         return {}
     try:
-        ls_str = page.evaluate(
+        ls_str = await page.evaluate(
             "JSON.stringify(Object.fromEntries(Object.keys(localStorage).map(k => [k, localStorage.getItem(k)])))"
         )
         ls = json.loads(ls_str or "{}")
@@ -118,7 +118,7 @@ def save_chatgpt_state(context: Any, page: Any, state_file: str = STATE_FILE) ->
         ls = {}
 
     try:
-        cookies = context.cookies("https://chatgpt.com")
+        cookies = await context.cookies("https://chatgpt.com")
     except Exception:
         cookies = []
 

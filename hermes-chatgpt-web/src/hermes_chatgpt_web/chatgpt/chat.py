@@ -1,4 +1,6 @@
+import asyncio
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 from ..core.config import is_no_login
@@ -6,85 +8,112 @@ from .config import NEW_CHAT_BUTTON_SELECTOR, TEXTAREA_SELECTOR
 from .status import check_generation_status, dismiss_modals
 
 
-def new_chat(page: Any):
+async def new_chat(page: Any):
     """Trigger the 'New Chat' action in ChatGPT Web."""
     try:
         btn = page.locator(NEW_CHAT_BUTTON_SELECTOR).first
-        if btn.count():
-            btn.click(timeout=6000)
-            time.sleep(0.8)
+        if (await btn.count()) > 0:
+            await btn.click(timeout=6000)
+            await asyncio.sleep(0.8)
     except Exception:
         pass
 
 
-def ask_stream(page: Any, prompt: str, model: str | None = None, reset: bool = False, state_dict: dict[str, Any] | None = None):
+async def ask_stream(
+    page: Any,
+    prompt: str,
+    model: str | None = None,
+    reset: bool = False,
+    state_dict: dict[str, Any] | None = None,
+) -> AsyncIterator[dict[str, Any]]:
     """
-    Stream tokens from ChatGPT Web page response.
+    Stream tokens from ChatGPT Web page response asynchronously.
     Updates state_dict with busy, last_activity, turns if provided.
     """
     model = model or "auto"
     if state_dict is not None and "lock" in state_dict:
-        with state_dict["lock"]:
+        lock = state_dict["lock"]
+        # Support both asyncio.Lock and threading.Lock
+        if hasattr(lock, "acquire") and asyncio.iscoroutinefunction(lock.acquire):
+            async with lock:
+                state_dict["busy"] = True
+                state_dict["busy_since"] = time.time()
+                state_dict["last_activity"] = time.time()
+                try:
+                    async for ev in _ask_locked(page, prompt, model, reset, state_dict):
+                        yield ev
+                finally:
+                    state_dict["busy"] = False
+                    state_dict["busy_since"] = None
+        else:
             state_dict["busy"] = True
             state_dict["busy_since"] = time.time()
             state_dict["last_activity"] = time.time()
             try:
-                yield from _ask_locked(page, prompt, model, reset, state_dict)
+                async for ev in _ask_locked(page, prompt, model, reset, state_dict):
+                    yield ev
             finally:
                 state_dict["busy"] = False
                 state_dict["busy_since"] = None
     else:
-        yield from _ask_locked(page, prompt, model, reset, state_dict)
+        async for ev in _ask_locked(page, prompt, model, reset, state_dict):
+            yield ev
 
 
-def _ask_locked(page: Any, prompt: str, model: str, reset: bool, state_dict: dict[str, Any] | None = None):
+async def _ask_locked(
+    page: Any,
+    prompt: str,
+    model: str,
+    reset: bool,
+    state_dict: dict[str, Any] | None = None,
+) -> AsyncIterator[dict[str, Any]]:
     if is_no_login():
         try:
-            page.reload(wait_until="domcontentloaded", timeout=60000)
-            time.sleep(3)
+            await page.reload(wait_until="domcontentloaded", timeout=60000)
+            await asyncio.sleep(3)
         except Exception:
             pass
     elif reset:
-        new_chat(page)
+        await new_chat(page)
 
     try:
-        turns0 = page.evaluate("document.querySelectorAll('[data-message-author-role=\"assistant\"]').length")
+        turns0 = await page.evaluate("document.querySelectorAll('[data-message-author-role=\"assistant\"]').length")
     except Exception:
         turns0 = 0
 
     try:
         if reset:
-            page.evaluate("""() => {
+            await page.evaluate("""() => {
                 for (const b of [...document.querySelectorAll('[role="dialog"] button, [data-testid="close-button"], button[aria-label*="close" i]')]) {
                     if (b.offsetParent !== null) { try { b.click(); } catch (e) {} }
                 }
                 const el = document.querySelector('#prompt-textarea');
                 if (el) { el.scrollIntoView({block: 'center'}); el.focus(); }
             }""")
-            time.sleep(0.4)
+            await asyncio.sleep(0.4)
 
-        # Auto-dismiss any active modals before prompt insertion (skip safely on error/absence)
+        # Auto-dismiss any active modals before prompt insertion
         try:
-            dismiss_modals(page)
+            await dismiss_modals(page)
         except Exception:
             pass
 
         try:
-            page.wait_for_selector(TEXTAREA_SELECTOR, state="visible", timeout=10000)
+            await page.wait_for_selector(TEXTAREA_SELECTOR, state="visible", timeout=10000)
         except Exception:
             pass
 
         ta = page.locator(TEXTAREA_SELECTOR).first
         try:
-            ta.click(timeout=8000)
+            await ta.click(timeout=8000)
         except Exception:
-            page.evaluate("() => { const el = document.querySelector('#prompt-textarea'); if (el) el.click(); }")
+            await page.evaluate("() => { const el = document.querySelector('#prompt-textarea'); if (el) el.click(); }")
     except Exception as e:
         yield {"error": f"composer not found: {str(e)[:200]}"}
         return
 
     try:
-        inserted = page.evaluate(
+        inserted = await page.evaluate(
             """(txt) => {
             const el = document.querySelector('#prompt-textarea');
             if (!el) return false;
@@ -99,7 +128,7 @@ def _ask_locked(page: Any, prompt: str, model: str, reset: bool, state_dict: dic
     except Exception:
         try:
             # Use clipboard-based paste to preserve non-Latin characters
-            page.evaluate(
+            await page.evaluate(
                 """(txt) => {
                 const el = document.querySelector('#prompt-textarea');
                 if (!el) throw new Error('no textarea');
@@ -117,9 +146,9 @@ def _ask_locked(page: Any, prompt: str, model: str, reset: bool, state_dict: dic
             yield {"error": "prompt insert failed"}
             return
 
-    time.sleep(0.3)
+    await asyncio.sleep(0.3)
     try:
-        page.keyboard.press("Enter")
+        await page.keyboard.press("Enter")
     except Exception:
         yield {"error": "send failed"}
         return
@@ -129,8 +158,8 @@ def _ask_locked(page: Any, prompt: str, model: str, reset: bool, state_dict: dic
     idle = 0
     s = {}
     while time.time() - t0 < 480:
-        time.sleep(0.25)
-        s = check_generation_status(page)
+        await asyncio.sleep(0.25)
+        s = await check_generation_status(page)
         if state_dict is not None:
             state_dict["last_activity"] = time.time()
             if s.get("turns", 0) > turns0:
@@ -159,11 +188,17 @@ def _ask_locked(page: Any, prompt: str, model: str, reset: bool, state_dict: dic
     yield {"done": True, "text": last}
 
 
-def ask(page: Any, prompt: str, model: str | None = None, reset: bool = False, state_dict: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Synchronous chat execution."""
+async def ask(
+    page: Any,
+    prompt: str,
+    model: str | None = None,
+    reset: bool = False,
+    state_dict: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Asynchronous chat execution."""
     out = ""
     error = None
-    for ev in ask_stream(page, prompt, model, reset=reset, state_dict=state_dict):
+    async for ev in ask_stream(page, prompt, model, reset=reset, state_dict=state_dict):
         if "error" in ev:
             error = ev["error"]
         elif ev.get("done"):

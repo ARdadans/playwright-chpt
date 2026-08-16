@@ -79,28 +79,39 @@ Pipeline pemrosesan berjalan melalui 7 tahapan berurutan:
 
 ---
 
-### Tahap 2: Event-Driven Worker Dispatcher
-1. Worker loop di `worker.py` berada dalam kondisi *sleeping* tanpa memakan resource CPU/HTTP:
+### Tahap 2: True Concurrent Event-Driven Worker Dispatcher
+1. Loop background worker di `worker.py` mengelola task aktif secara paralel (`active_tasks: set[asyncio.Task]`):
+   - Memeriksa kesiapan gateway browser (`gw_status()`).
+   - Menghitung kapasitas slot worker yang siap:
+     ```python
+     idle_workers = pool_info.get("idle_workers", 1)
+     available_slots = idle_workers - len(active_tasks)
+     ```
+2. Jika `available_slots <= 0`, worker menunggu sejenak (0.5 detik) hingga salah satu context akun menyelesaikan tugasnya atau cooldown berakhir.
+3. Jika terdapat slot yang tersedia:
+   - Worker mengklaim job antrean pending berikutnya secara atomik via `claim_next_pending_job()`.
+   - Jika tidak ada job pending, worker menunggu sinyal reaktif `job_notify.wait()` dengan batas timeout `worker_poll_interval` (default 2 detik).
+4. Setiap job yang berhasil diklaim langsung dieksekusi secara asinkron tanpa memblokir antrean:
    ```python
-   await asyncio.wait_for(job_notify.wait(), timeout=60)
+   t = asyncio.create_task(process_job(job))
+   active_tasks.add(t)
+   t.add_done_callback(active_tasks.discard)
    ```
-2. Ketika ada sinyal masuk (atau saat timeout safety sweep 60 detik tiba), event di-reset (`job_notify.clear()`).
-3. Worker mengambil batch job dengan status `pending` dibatasi oleh `WORKER_CONCURRENCY`.
-4. Memeriksa kesiapan gateway browser (`gw_status()`). Jika browser belum siap, worker melakukan backoff selama 30 detik.
-5. Menjalankan proses per job secara paralel via `asyncio.create_task(_process_job(job))`.
+5. Setiap 15 detik, loop secara periodik mengecek dan memulihkan akun yang masa cooldown-nya telah habis (`check_and_release_cooldowns()`).
 
 ---
 
 ### Tahap 3: Job Claiming & Context Assembly
-1. **Atomic Claim**:
-   - Menjalankan `claim_job(job_id)` untuk mengubah status job menjadi `processing` secara transaksional di SQLite sehingga tidak dieksekusi ganda.
-2. **Penyusunan Kontinuitas & Teks**:
-   - Seperti halnya glosarium, lampiran karakter dari bab sebelumnya tidak disematkan ke pesan chat/request LLM. Namun LLM tetap mengekstrak karakter dan istilah baru yang muncul di bab tersebut pada format respons.
+1. **Atomic Claim & State Logging**:
+   - Menjalankan `claim_next_pending_job()` untuk mengubah status job dari `pending` menjadi `running` secara transaksional di SQLite sehingga terlindungi dari *race condition*.
+   - Mencatat transisi event state di database dan log stream.
+2. **Penyusunan Kontinuitas Karakter**:
+   - Karakter yang sudah terdaftar pada bab-bab sebelumnya (`existing_characters`) disematkan ke dalam konteks prompt agar konsistensi penamaan terjaga.
 3. **Ekstraksi Gambar & Placeholder (`extract_images`)**:
    - Seluruh tag gambar baik format Markdown (`![alt](url)`) maupun tag HTML (`<img ...>`) diekstrak dari teks sumber dan digantikan sementara dengan placeholder terindeks (`<<<IMG_0>>>`, `<<<IMG_1>>>`, dst.).
    - Hal ini menghemat token dan mencegah LLM merusak/menerjemahkan URL panjang atau tag HTML.
 4. **Penyusunan Pesan Prompt (`build_translation_messages`)**:
-   - Menggabungkan **System Prompt** (aturan gaya penulisan, pencegahan sensor, larangan ringkasan, pelestarian marker `<<<IMG_n>>>`, konversi formatting ke *custom delimiters*).
+   - Menggabungkan **System Prompt** (aturan gaya penulisan, pencegahan sensor, larangan ringkasan, pelestarian marker `<<<IMG_n>>>`, konversi formatting ke format output terstruktur).
    - Menyematkan teks sumber yang sudah dibersihkan dan dibungkus marker:
      ```text
      <<<TEXT_START>>>
@@ -110,13 +121,16 @@ Pipeline pemrosesan berjalan melalui 7 tahapan berurutan:
 
 ---
 
-### Tahap 4: Eksekusi LLM via Gateway Stream
+### Tahap 4: Eksekusi LLM via True Concurrent Gateway Stream
 1. Menyusun struktur pesan role-based (`[system]` dan `[user]`).
-2. Menghubungi endpoint internal `/chat/stream` melalui `gw_chat_stream()` dalam worker thread (`asyncio.to_thread`).
+2. Mengirimkan prompt secara langsung ke gateway asinkron melalui generator `gw_chat_stream(body)` tanpa *thread lock blocking*.
 3. Mengalirkan respons secara real-time hingga selesai (`done: true`).
-4. **Mekanisme Retry**:
-   - Jika terjadi timeout (`TRANSLATION_JOB_TIMEOUT`) atau kegagalan koneksi LLM gateway, worker melakukan retry otomatis dengan jadwal backoff eksponensial (`LLM_BACKOFF_SCHEDULE = [2, 8]` detik).
-   - Bila seluruh percobaan gagal, status job diubah menjadi `failed` dengan error code `LLM_API_ERROR`.
+4. **Penanganan Rate Limit & Cooldown**:
+   - Jika response mengandung pesan limit ChatGPT (misal *"You've reached your usage limit"* atau error *"no_available_workers"*), worker menangkap `RateLimitException`.
+   - Job dikembalikan secara aman ke antrean `pending` (`requeue_job_to_pending`), status akun diubah ke `COOLDOWN`, dan worker lain yang aktif akan otomatis mengambil alih job tersebut.
+5. **Mekanisme Retry**:
+   - Jika terjadi timeout (`TRANSLATION_JOB_TIMEOUT`) atau error koneksi biasa, sistem melakukan retry otomatis dengan interval backoff.
+   - Bila seluruh percobaan gagal, status job diubah menjadi `failed` dengan error code `LLM_TIMEOUT` atau `LLM_API_ERROR`.
 
 ---
 

@@ -2,12 +2,13 @@
 
 CLI Client dan Automation Tool untuk berinteraksi dengan backend **Hermes Novel Translation System** (`hermes-chatgpt-web`).
 
-Aplikasi ini mendukung seluruh fitur terbaru dari Hermes, termasuk **Database Backup & Restore System**, **Asynchronous Translation Queue**, **Per-Context Cooldown**, **Dynamic `/settings` Management**, **Cookie Worker Pool & Context Refresh**, **Novel & Continuity Tracking (Characters & Glossary CRUD/Bulk/Export)**, **Job Version History & Rollback**, serta **Batch TOC Generator**.
+Aplikasi ini mendukung seluruh fitur terbaru dari Hermes, termasuk **True Concurrent Multi-Account Processing**, **Database Backup & Restore System**, **Asynchronous Translation Queue**, **Per-Context Cooldown**, **Dynamic `/settings` Management**, **Cookie Worker Pool & Context Refresh**, **Novel & Continuity Tracking (Characters & Glossary CRUD/Bulk/Export)**, **Job Version History & Rollback**, serta **Batch TOC Generator**.
 
 ---
 
 ## 📌 Fitur Utama
 
+- ⚡ **True Concurrent Multi-Account Processing**: Ketika backend Hermes memiliki banyak akun aktif, pengiriman batch bab novel akan langsung diproses secara **paralel murni (concurrent)** oleh worker-worker yang siap tanpa bottleneck.
 - 💾 **Sistem Backup & Restore SQLite (`db` / `backup` / `restore`)**: Mengunduh arsip snapshot konsisten `.zip` berisi database SQLite dan metadata, melihat statistik tabel, dan merestore database dari file `.zip`.
 - 🚀 **Asynchronous Queue Integration (`/translate`)**: Mengirimkan bab novel ke antrean SQLite Hermes, polling realtime hingga selesai, dan menyimpan output Markdown secara otomatis.
 - ⏱️ **Context Cooldown & Worker Monitoring**: Melihat status isolated Playwright context, status cooldown (default 60 detik), mereset cooldown per akun, dan me-refresh browser context.
