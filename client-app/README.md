@@ -103,12 +103,12 @@ Dalam mode interaktif, tersedia menu:
 
 ---
 
-### 2. Sistem Backup & Restore Database (`db` / `backup` / `restore`)
+### 2. Sistem Backup, Restore & Pembaca Arsip Database (`db` / `backup` / `restore` / `read-backup`)
 
-Mengelola snapshot cadangan SQLite database Hermes secara konsisten dan aman:
+Mengelola snapshot cadangan SQLite database Hermes secara konsisten dan aman, serta membaca/mengeksplorasi isi file backup (`.zip` / `.db`) secara offline langsung berdasarkan path:
 
 ```bash
-# Melihat statistik jumlah baris seluruh tabel database Hermes
+# Melihat statistik jumlah baris seluruh tabel database Hermes aktif
 uv run start db stats --server http://localhost:18111
 
 # Mengunduh snapshot backup database (.zip)
@@ -120,6 +120,24 @@ uv run start db backup --output backups/hermes_backup_20260816.zip
 uv run start restore --file backups/hermes_backup_20260816.zip --server http://localhost:18111
 # Atau menggunakan subcommand db:
 uv run start db restore --file backups/hermes_backup_20260816.zip
+
+# 📖 Membaca & mengeksplorasi arsip backup secara interaktif (Terminal UI)
+uv run start read-backup --file hermes_backup_20260817_074046.zip
+# Atau cukup jalankan tanpa argumen untuk memilih dari daftar file zip di folder:
+uv run start read-backup
+
+# 📊 Inspeksi ringkasan arsip backup via CLI
+uv run start db inspect --file hermes_backup_20260817_074046.zip
+
+# 🔍 Melihat daftar bab & status novel tertentu dari file backup
+uv run start db inspect --file hermes_backup_20260817_074046.zip --novel office-worker-who-sees-fate
+
+# 📖 Membaca teks hasil terjemahan bab tertentu langsung dari backup
+uv run start db inspect --file hermes_backup_20260817_074046.zip --novel office-worker-who-sees-fate --chapter 2
+
+# 💾 Mengekspor seluruh bab selesai dari backup ke folder atau file kompilasi
+uv run start db export --file hermes_backup_20260817_074046.zip --novel office-worker-who-sees-fate --format txt --output-dir exported_novel/
+uv run start db export --file hermes_backup_20260817_074046.zip --novel office-worker-who-sees-fate --format md --single-file --output novel_lengkap.md
 ```
 
 ---

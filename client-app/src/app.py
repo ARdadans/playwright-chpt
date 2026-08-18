@@ -18,7 +18,7 @@ if hasattr(sys.stderr, "reconfigure"):
 
 import core.config as config
 from core.config import set_config
-from interactive import run_interactive_menu
+from interactive import interactive_read_backup, run_interactive_menu
 from services.api import (
     add_cookie,
     backup_database,
@@ -63,6 +63,7 @@ from services.api import (
     update_settings,
     wait_for_job,
 )
+from services.backup_reader import BackupReader
 
 
 def _print_header(title: str):
@@ -731,12 +732,12 @@ def cmd_novel(args):
 
 
 def cmd_database(args):
-    """Backup, restore, or view database statistics for Hermes."""
-    _print_header("HERMES DATABASE BACKUP & RESTORE")
-    print(f"Target Server: {config.get_base_url()}\n")
+    """Backup, restore, inspect, or view database statistics for Hermes."""
+    _print_header("HERMES DATABASE BACKUP, RESTORE & INSPECTOR")
     sub = getattr(args, "db_action", None) or "stats"
 
     if sub == "stats":
+        print(f"Target Server: {config.get_base_url()}\n")
         stats = get_database_stats()
         if stats:
             print("Database Table Row Counts & Statistics:")
@@ -746,6 +747,7 @@ def cmd_database(args):
             print("[-] Failed to retrieve database stats.")
 
     elif sub == "backup":
+        print(f"Target Server: {config.get_base_url()}\n")
         out_path = getattr(args, "output", None)
         print("[*] Requesting SQLite database backup snapshot from Hermes...")
         ok, path_or_err, byte_count = backup_database(output_path=out_path)
@@ -758,6 +760,7 @@ def cmd_database(args):
             print(f"[-] Backup failed: {path_or_err}")
 
     elif sub == "restore":
+        print(f"Target Server: {config.get_base_url()}\n")
         in_file = getattr(args, "file", None)
         if not in_file:
             print("[-] Error: --file <path_to_backup.zip> is required for restore.")
@@ -780,6 +783,114 @@ def cmd_database(args):
                     print(f"      - {k:<20}: {v}")
         else:
             print("[-] Database restore failed.")
+
+    elif sub in ("inspect", "read", "view"):
+        in_file = getattr(args, "file", None)
+        if not in_file:
+            # Auto-detect latest backup in current directory
+            candidates = list(Path.cwd().glob("hermes_backup_*.zip")) + list((Path.cwd() / "client-app").glob("hermes_backup_*.zip"))
+            if candidates:
+                candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                in_file = str(candidates[0])
+                print(f"[*] Auto-detected backup file: {in_file}")
+            else:
+                print("[-] Error: --file <path_to_backup.zip> is required.")
+                return
+
+        fp = Path(in_file.strip('"').strip("'"))
+        try:
+            reader = BackupReader(fp)
+            with reader:
+                novel_id = getattr(args, "novel", None)
+                chapter_num = getattr(args, "chapter", None)
+
+                if chapter_num is not None:
+                    if not novel_id:
+                        novels = reader.list_novels()
+                        if len(novels) == 1:
+                            novel_id = novels[0]["novel_id"]
+                        else:
+                            print("[-] Error: Please specify --novel <novel_id> when inspecting a chapter.")
+                            return
+
+                    ch = reader.get_chapter(novel_id, chapter_num)
+                    if not ch:
+                        print(f"[-] Chapter {chapter_num:g} not found for novel '{novel_id}' in backup.")
+                        return
+
+                    print(f"Novel ID    : {novel_id}")
+                    print(f"Chapter     : {ch.get('chapter_number'):g}")
+                    print(f"Status      : {ch.get('status')}")
+                    print(f"Model       : {ch.get('model')}")
+                    print(f"Created At  : {ch.get('created_at')}")
+                    print(f"Updated At  : {ch.get('updated_at')}")
+                    if ch.get("result_summary"):
+                        print(f"\n--- Summary ---\n{ch.get('result_summary')}")
+                    print(f"\n--- Translation ---\n{ch.get('result_translation') or '(No translation text)'}")
+                    return
+
+                if novel_id:
+                    stats = reader.get_novel_stats(novel_id)
+                    print(f"Novel ID          : {stats['novel_id']}")
+                    print(f"Completed Chapters: {stats['done_chapters']}/{stats['total_chapters']} ({stats['progress_percent']}%)")
+                    print(f"Failed / Cancelled: {stats['failed_chapters']} failed, {stats['cancelled_chapters']} cancelled")
+                    print(f"Chapter Range     : Chapter {stats['min_chapter']} to {stats['max_chapter']}")
+                    print(f"Language Pair     : {stats['source_lang']} -> {stats['target_lang']}")
+                    print(f"Characters / Lore : {stats['characters_count']} entries")
+                    print(f"Glossary Terms    : {stats['glossary_count']} entries")
+                    print(f"Last Updated      : {stats['latest_update']}")
+
+                    chapters = reader.list_chapters(novel_id, limit=30)
+                    print(f"\nChapters Preview (First {len(chapters)} chapters):")
+                    for c in chapters:
+                        snippet = (c.get("translation_snippet") or c.get("error_message") or "").replace("\n", " ")[:50]
+                        print(f"  * Chapter {c['chapter_number']:<6g} | {c['status']:<9} | {snippet}...")
+                    return
+
+                # Default: Show comprehensive backup overview
+                ov = reader.get_overview()
+                f_info = ov["file"]
+                meta = ov["metadata"]
+                jobs = ov["job_statuses"]
+                novels = ov["novels"]
+
+                print(f"Backup Archive    : {f_info['filename']}")
+                print(f"Full Path         : {f_info['path']}")
+                print(f"File Size         : {f_info['size_mb']} MB ({f_info['size_bytes']:,} bytes)")
+                print(f"Export Timestamp  : {meta.get('exported_at') or f_info['modified_at']}")
+                print(f"Format Version    : {meta.get('version', '1.0.0')}")
+                print(f"Total Jobs        : {ov['total_jobs']} ({jobs.get('done', 0)} done, {jobs.get('failed', 0)} failed, {jobs.get('cancelled', 0)} cancelled)")
+                print(f"Total Characters  : {ov['total_characters']} entries")
+                print(f"Total Glossary    : {ov['total_glossary']} entries")
+                print(f"Total Cookies     : {ov['total_cookies']} accounts")
+
+                print(f"\nNovels in Archive ({len(novels)} total):")
+                for n in novels:
+                    print(f"  * {n['novel_id']:<30} -> {n['done_chapters']}/{n['total_chapters']} chapters ({n['progress_percent']}%) | {n['characters_count']} chars | {n['glossary_count']} glossary")
+        except Exception as e:
+            print(f"[-] Error inspecting backup archive: {e}")
+
+    elif sub == "export":
+        in_file = getattr(args, "file", None)
+        if not in_file:
+            print("[-] Error: --file <path_to_backup.zip> is required for export.")
+            return
+        novel_id = getattr(args, "novel", None)
+        if not novel_id:
+            print("[-] Error: --novel <novel_id> is required for export.")
+            return
+
+        fmt = getattr(args, "format", "txt") or "txt"
+        single_file = getattr(args, "single_file", False)
+        out_dir = getattr(args, "output", None) or (f"{novel_id}_complete.{fmt}" if single_file else f"export_{novel_id}")
+
+        try:
+            reader = BackupReader(Path(in_file))
+            with reader:
+                cnt, dest = reader.export_chapters(novel_id, output_dir=out_dir, format=fmt, single_file=single_file)
+                print(f"[+] Successfully exported {cnt} chapters to: {dest.resolve()}")
+        except Exception as e:
+            print(f"[-] Export failed: {e}")
 
 
 # ─── 8. Direct Interactive Chat ───────────────────────────────────────────────
@@ -953,10 +1064,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_novel.set_defaults(func=cmd_novel)
 
     # 8. database / db
-    p_db = subparsers.add_parser("db", parents=[common_parser], aliases=["database"], help="Database backup, restore, and table statistics")
-    p_db.add_argument("db_action", nargs="?", choices=["stats", "backup", "restore"], default="stats")
-    p_db.add_argument("--file", type=str, help="Path to .zip backup archive for restore")
-    p_db.add_argument("--output", type=str, help="Output .zip path for backup")
+    p_db = subparsers.add_parser("db", parents=[common_parser], aliases=["database"], help="Database backup, restore, inspect, and table statistics")
+    p_db.add_argument("db_action", nargs="?", choices=["stats", "backup", "restore", "inspect", "export"], default="stats")
+    p_db.add_argument("--file", type=str, help="Path to .zip or .db backup archive")
+    p_db.add_argument("--output", type=str, help="Output file/folder path for backup or export")
+    p_db.add_argument("--novel", type=str, help="Novel ID to inspect or export from backup")
+    p_db.add_argument("--chapter", type=float, help="Chapter number to inspect/read from backup")
+    p_db.add_argument("--format", type=str, choices=["txt", "md", "json"], default="txt", help="Export format")
+    p_db.add_argument("--single-file", action="store_true", help="Export chapters consolidated as a single file")
     p_db.set_defaults(func=cmd_database)
 
     # 9. backup alias (top-level)
@@ -968,6 +1083,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_res = subparsers.add_parser("restore", parents=[common_parser], help="Restore SQLite database from a .zip backup archive")
     p_res.add_argument("--file", type=str, required=True, help="Path to .zip backup archive")
     p_res.set_defaults(func=lambda a: cmd_database(argparse.Namespace(db_action="restore", file=a.file, **vars(a))))
+
+    # 11. read-backup / inspect-backup alias (top-level)
+    p_read_bak = subparsers.add_parser("read-backup", parents=[common_parser], aliases=["inspect-backup"], help="Interactive or CLI reader for SQLite backup archives (.zip/.db)")
+    p_read_bak.add_argument("--file", type=str, help="Path to .zip or .db backup archive")
+    p_read_bak.add_argument("--novel", type=str, help="Novel ID to inspect")
+    p_read_bak.add_argument("--chapter", type=float, help="Chapter number to read")
+    p_read_bak.set_defaults(func=lambda a: cmd_database(argparse.Namespace(db_action="inspect", **vars(a))) if (getattr(a, "novel", None) or getattr(a, "chapter", None)) else interactive_read_backup(a.file))
 
     # 11. chat
     p_chat = subparsers.add_parser("chat", parents=[common_parser], help="Interactive OpenAI chat session")

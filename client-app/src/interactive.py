@@ -61,6 +61,7 @@ from services.api import (
     update_settings,
     wait_for_job,
 )
+from services.backup_reader import BackupReader
 
 # ─── Terminal Styling Helpers ─────────────────────────────────────────────────
 
@@ -767,15 +768,532 @@ def interactive_settings():
 # ─── 8. Database Backup & Restore ─────────────────────────────────────────────
 
 
+def _detect_local_backups() -> list[Path]:
+    """Find local .zip and .db backup archives in workspace directories."""
+    candidates: list[Path] = []
+    seen = set()
+
+    search_dirs = [Path.cwd(), Path.cwd() / "client-app", Path(__file__).resolve().parent.parent]
+    for d in search_dirs:
+        if not d.is_dir():
+            continue
+        try:
+            for p in d.glob("hermes_backup_*.zip"):
+                resolved = p.resolve()
+                if resolved not in seen and resolved.is_file():
+                    candidates.append(resolved)
+                    seen.add(resolved)
+            for p in d.glob("*.zip"):
+                resolved = p.resolve()
+                if resolved not in seen and resolved.is_file():
+                    candidates.append(resolved)
+                    seen.add(resolved)
+            for p in d.glob("*.db"):
+                resolved = p.resolve()
+                if resolved not in seen and resolved.is_file():
+                    candidates.append(resolved)
+                    seen.add(resolved)
+        except Exception:
+            pass
+
+    # Sort by modification time descending (newest first)
+    candidates.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+    return candidates
+
+
+def _read_chapter_interactive(reader: BackupReader, novel_id: str, default_ch: float | None = None):
+    """View full translation and metadata for a specific chapter."""
+    ch_input = _prompt("Masukkan Nomor Bab yang Ingin Dibaca", default=str(default_ch) if default_ch is not None else "1")
+    try:
+        ch_num = float(ch_input)
+    except ValueError:
+        print(f"{RED}Nomor bab tidak valid.{RESET}")
+        _pause()
+        return
+
+    chapter = reader.get_chapter(novel_id, ch_num)
+    if not chapter:
+        print(f"{RED}Bab {ch_num} tidak ditemukan untuk novel '{novel_id}' di arsip backup ini.{RESET}")
+        _pause()
+        return
+
+    while True:
+        status = chapter.get("status", "unknown").upper()
+        status_color = GREEN if status == "DONE" else (RED if status == "FAILED" else YELLOW)
+        model = chapter.get("model", "N/A")
+        src_lang = chapter.get("source_lang", "ko")
+        tgt_lang = chapter.get("target_lang", "id")
+        created_at = chapter.get("created_at", "N/A")
+        updated_at = chapter.get("updated_at", "N/A")
+        trans_text = chapter.get("result_translation") or ""
+        source_text = chapter.get("source_text_raw") or chapter.get("source_text_cleaned") or ""
+        summary = chapter.get("result_summary") or ""
+        err_msg = chapter.get("error_message") or ""
+
+        _header(f"📖 NOVEL: {novel_id} — BAB {ch_num:g}")
+        print(f"  Status        : {status_color}{BOLD}{status}{RESET}")
+        print(f"  Model LLM     : {BOLD}{model}{RESET} | Bahasa: {src_lang} -> {tgt_lang}")
+        print(f"  Waktu Dibuat  : {created_at}")
+        print(f"  Waktu Update  : {updated_at}")
+        print(f"  Panjang Teks  : Terjemahan: {len(trans_text):,} chars | Sumber: {len(source_text):,} chars")
+
+        if summary:
+            print(f"\n{BOLD}{CYAN}📝 Rangkuman / Ringkasan Bab:{RESET}")
+            print("-" * 65)
+            print(summary)
+            print("-" * 65)
+
+        if err_msg and status != "DONE":
+            print(f"\n{RED}{BOLD}⚠️ Log Kesalahan (Error):{RESET}")
+            print(f"{RED}{err_msg}{RESET}")
+
+        print("\nPilihan Tampilan:")
+        print("  [1] Tampilkan Teks Terjemahan Lengkap")
+        print("  [2] Tampilkan Teks Asli (Source Text)")
+        print("  [3] Tampilkan Keduanya (Bilingual)")
+        print("  [4] Simpan Bab Ini ke File Teks / Markdown")
+        print("  [0] Kembali ke Menu Bab")
+
+        opt = input("\nPilihan [0-4]: ").strip()
+        if opt == "0":
+            break
+        elif opt == "1":
+            print(f"\n{BOLD}{GREEN}=== TEKS TERJEMAHAN (BAB {ch_num:g}) ==={RESET}\n")
+            print(trans_text if trans_text else f"{YELLOW}(Teks terjemahan kosong / belum selesai){RESET}")
+            print(f"\n{DIM}{'=' * 65}{RESET}")
+            _pause()
+        elif opt == "2":
+            print(f"\n{BOLD}{CYAN}=== TEKS ASLI / SOURCE (BAB {ch_num:g}) ==={RESET}\n")
+            print(source_text if source_text else f"{YELLOW}(Teks sumber tidak tersedia){RESET}")
+            print(f"\n{DIM}{'=' * 65}{RESET}")
+            _pause()
+        elif opt == "3":
+            print(f"\n{BOLD}{CYAN}=== [1/2] TEKS ASLI / SOURCE ==={RESET}\n")
+            print(source_text if source_text else "(kosong)")
+            print(f"\n{BOLD}{GREEN}=== [2/2] TEKS HASIL TERJEMAHAN ==={RESET}\n")
+            print(trans_text if trans_text else "(kosong)")
+            print(f"\n{DIM}{'=' * 65}{RESET}")
+            _pause()
+        elif opt == "4":
+            fmt = _prompt("Format file (txt/md)", default="txt").lower()
+            def_name = f"{novel_id}_chapter_{ch_num:g}.{fmt}"
+            out_file = _prompt("Simpan ke file", default=def_name)
+            p = Path(out_file)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                if fmt == "md":
+                    f.write(f"# {novel_id} - Chapter {ch_num:g}\n\n")
+                    if summary:
+                        f.write(f"> **Summary**: {summary}\n\n")
+                    f.write(f"{trans_text}\n")
+                else:
+                    f.write(f"=== {novel_id} - Chapter {ch_num:g} ===\n\n")
+                    if summary:
+                        f.write(f"[Summary: {summary}]\n\n")
+                    f.write(f"{trans_text}\n")
+            print(f"\n{GREEN}[+] Bab {ch_num:g} berhasil disimpan ke: {p.resolve()}{RESET}")
+            _pause()
+
+
+def _list_chapters_interactive(reader: BackupReader, novel_id: str):
+    """Paginated list of chapters with filtering and direct jump to read."""
+    status_filter = None
+    page = 0
+    page_size = 20
+
+    while True:
+        all_ch = reader.list_chapters(novel_id, status=status_filter, order="ASC")
+        total = len(all_ch)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        page = max(0, min(page, total_pages - 1))
+
+        start_idx = page * page_size
+        end_idx = min(start_idx + page_size, total)
+        current_page_items = all_ch[start_idx:end_idx]
+
+        filter_label = status_filter.upper() if status_filter else "SEMUA"
+        _header(f"📋 DAFTAR BAB: {novel_id} (Filter: {filter_label} | Hal {page + 1}/{total_pages})")
+        print(f"Total Bab Ditemukan: {BOLD}{total}{RESET} bab\n")
+
+        if not current_page_items:
+            print(f"{YELLOW}Tidak ada bab dengan filter saat ini.{RESET}")
+        else:
+            print(f"{'Bab':<8} | {'Status':<10} | {'Panjang':<10} | {'Cuplikan Terjemahan / Error'}")
+            print("-" * 75)
+            for ch in current_page_items:
+                ch_num_str = f"Bab {ch['chapter_number']:g}"
+                st = ch["status"].upper()
+                st_color = GREEN if st == "DONE" else (RED if st == "FAILED" else YELLOW)
+                st_str = f"{st_color}{st:<10}{RESET}"
+                len_str = f"{ch.get('translation_len', 0):,} c"
+
+                if st == "DONE":
+                    snippet = (ch.get("translation_snippet") or "").replace("\n", " ")[:40]
+                else:
+                    snippet = (ch.get("error_message") or "(belum ada pesan error)").replace("\n", " ")[:40]
+
+                print(f"{ch_num_str:<8} | {st_str} | {len_str:<10} | {DIM}{snippet}...{RESET}")
+
+        print("\n" + "-" * 75)
+        print("Navigasi: [N] Berikutnya | [P] Sebelumnya | [F] Ganti Filter | [R] Baca Bab | [0] Kembali")
+        cmd = input("Pilihan: ").strip().lower()
+
+        if cmd == "0" or cmd in ("q", "back", "kembali"):
+            break
+        elif cmd == "n":
+            if page < total_pages - 1:
+                page += 1
+            else:
+                print(f"{YELLOW}Sudah di halaman terakhir.{RESET}")
+                time.sleep(0.6)
+        elif cmd == "p":
+            if page > 0:
+                page -= 1
+            else:
+                print(f"{YELLOW}Sudah di halaman pertama.{RESET}")
+                time.sleep(0.6)
+        elif cmd == "f":
+            print("\nPilih Filter Status:")
+            print("  [1] Semua Bab")
+            print("  [2] Hanya Selesai (DONE)")
+            print("  [3] Hanya Gagal (FAILED)")
+            print("  [4] Hanya Dibatalkan (CANCELLED)")
+            fc = input("Pilihan [1-4]: ").strip()
+            if fc == "1":
+                status_filter = None
+            elif fc == "2":
+                status_filter = "done"
+            elif fc == "3":
+                status_filter = "failed"
+            elif fc == "4":
+                status_filter = "cancelled"
+            page = 0
+        elif cmd == "r" or cmd.replace(".", "", 1).isdigit():
+            default_ch = float(cmd) if cmd.replace(".", "", 1).isdigit() else None
+            _read_chapter_interactive(reader, novel_id, default_ch=default_ch)
+
+
+def _list_characters_interactive(reader: BackupReader, novel_id: str):
+    """View character cards and lore from backup."""
+    search_kw = None
+    while True:
+        chars = reader.list_characters(novel_id, search=search_kw)
+        _header(f"👥 KARAKTER & LORE: {novel_id}")
+        if search_kw:
+            print(f"Filter Pencarian : '{BOLD}{search_kw}{RESET}'")
+        print(f"Total Karakter   : {BOLD}{len(chars)}{RESET} entri\n")
+
+        if not chars:
+            print(f"{YELLOW}Tidak ada karakter ditemukan.{RESET}")
+        else:
+            for idx, c in enumerate(chars, 1):
+                name = c.get("name", "N/A")
+                native = c.get("native_name") or ""
+                native_str = f" ({native})" if native else ""
+                gender = c.get("gender") or "N/A"
+                first_ch = c.get("first_seen_chapter")
+                ch_str = f"Bab {first_ch:g}" if first_ch is not None else "N/A"
+                notes = (c.get("notes") or "-").replace("\n", " ")
+
+                print(f"[{idx}] {BOLD}{CYAN}{name}{RESET}{native_str} | Gender: {gender} | Muncul: {ch_str}")
+                print(f"    {DIM}Notes: {notes[:90]}{'...' if len(notes) > 90 else ''}{RESET}")
+
+        print("\nPilihan:")
+        print("  [C] Cari Karakter berdasarkan Nama / Catatan")
+        print("  [R] Reset Pencarian")
+        print("  [0] Kembali")
+        act = input("\nPilihan: ").strip().lower()
+        if act == "0":
+            break
+        elif act == "c":
+            kw = _prompt("Kata kunci pencarian karakter")
+            search_kw = kw if kw else None
+        elif act == "r":
+            search_kw = None
+
+
+def _list_glossary_interactive(reader: BackupReader, novel_id: str):
+    """View glossary terms from backup."""
+    search_kw = None
+    while True:
+        gloss = reader.list_glossary(novel_id, search=search_kw)
+        _header(f"📚 GLOSARIUM ISTILAH: {novel_id}")
+        if search_kw:
+            print(f"Filter Pencarian : '{BOLD}{search_kw}{RESET}'")
+        print(f"Total Glosarium  : {BOLD}{len(gloss)}{RESET} entri\n")
+
+        if not gloss:
+            print(f"{YELLOW}Tidak ada istilah glosarium ditemukan.{RESET}")
+        else:
+            print(f"{'No':<4} | {'Istilah Asli (Source)':<25} | {'Terjemahan Target':<25} | {'Catatan'}")
+            print("-" * 75)
+            for idx, g in enumerate(gloss, 1):
+                src = g.get("term_source", "")[:24]
+                tgt = g.get("term_translation", "")[:24]
+                notes = (g.get("notes") or "-").replace("\n", " ")[:20]
+                print(f"{idx:<4} | {CYAN}{src:<25}{RESET} | {GREEN}{tgt:<25}{RESET} | {DIM}{notes}{RESET}")
+
+        print("\nPilihan:")
+        print("  [C] Cari Istilah / Terjemahan")
+        print("  [R] Reset Pencarian")
+        print("  [0] Kembali")
+        act = input("\nPilihan: ").strip().lower()
+        if act == "0":
+            break
+        elif act == "c":
+            kw = _prompt("Kata kunci pencarian glosarium")
+            search_kw = kw if kw else None
+        elif act == "r":
+            search_kw = None
+
+
+def _explore_backup_novel(reader: BackupReader, novel_id: str):
+    """Submenu for detailed exploration and export of a specific novel in backup."""
+    while True:
+        stats = reader.get_novel_stats(novel_id)
+        _header(f"📖 EKSPLORASI NOVEL: {novel_id}")
+        tot = stats.get("total_chapters", 0)
+        done = stats.get("done_chapters", 0)
+        failed = stats.get("failed_chapters", 0)
+        canc = stats.get("cancelled_chapters", 0)
+        pct = stats.get("progress_percent", 0.0)
+        min_ch = stats.get("min_chapter")
+        max_ch = stats.get("max_chapter")
+        ch_range = f"Bab {min_ch:g} s/d {max_ch:g}" if min_ch is not None else "N/A"
+
+        print(f"  Novel ID        : {BOLD}{CYAN}{novel_id}{RESET}")
+        print(f"  Status Progres  : {GREEN}{BOLD}{done}/{tot} bab selesai ({pct:.1f}%){RESET}")
+        print(f"  Bab Gagal/Batal : {RED}{failed} gagal{RESET}, {YELLOW}{canc} dibatalkan{RESET}")
+        print(f"  Rentang Bab     : {ch_range}")
+        print(f"  Bahasa          : {stats.get('source_lang')} -> {stats.get('target_lang')}")
+        print(f"  Karakter & Lore : {CYAN}{stats.get('characters_count', 0)}{RESET} entri")
+        print(f"  Glosarium       : {CYAN}{stats.get('glossary_count', 0)}{RESET} entri")
+        print(f"  Update Terakhir : {stats.get('latest_update')}")
+
+        print("\nMenu Aksi Novel:")
+        print("  [1] 📋 Lihat Daftar Bab & Status Terjemahan (Pagination & Filter)")
+        print("  [2] 📖 Baca Teks Terjemahan Bab Tertentu (Full Translation/Bilingual)")
+        print("  [3] 👥 Lihat Daftar Karakter & Lore Novel")
+        print("  [4] 📚 Lihat Daftar Glosarium Istilah Novel")
+        print("  [5] 💾 Ekspor Seluruh Bab Selesai ke Folder File Teks / Markdown")
+        print("  [6] 📑 Ekspor Seluruh Bab Selesai Jadi Satu File Buku Kompilasi")
+        print("  [7] 📦 Ekspor Karakter & Glosarium ke JSON")
+        print("  [0] Kembali ke Ringkasan Backup")
+
+        choice = input("\nPilihan [0-7]: ").strip()
+        if choice == "0":
+            break
+        elif choice == "1":
+            _list_chapters_interactive(reader, novel_id)
+        elif choice == "2":
+            _read_chapter_interactive(reader, novel_id)
+        elif choice == "3":
+            _list_characters_interactive(reader, novel_id)
+        elif choice == "4":
+            _list_glossary_interactive(reader, novel_id)
+        elif choice == "5":
+            fmt = _prompt("Format file (txt/md/json)", default="txt")
+            def_out = f"export_{novel_id}"
+            out_dir = _prompt("Folder tujuan ekspor", default=def_out)
+            print(f"[*] Mengekspor bab novel '{novel_id}' ke folder '{out_dir}'...")
+            cnt, dest = reader.export_chapters(novel_id, output_dir=out_dir, format=fmt, single_file=False)
+            print(f"\n{GREEN}{BOLD}[+] Berhasil mengekspor {cnt} bab ke: {dest.resolve()}{RESET}")
+            _pause()
+        elif choice == "6":
+            fmt = _prompt("Format file (txt/md)", default="txt")
+            def_out = f"{novel_id}_complete.{fmt}"
+            out_file = _prompt("Nama file kompilasi", default=def_out)
+            print(f"[*] Menggabungkan seluruh bab novel '{novel_id}' ke '{out_file}'...")
+            cnt, dest = reader.export_chapters(novel_id, output_dir=out_file, format=fmt, single_file=True)
+            print(f"\n{GREEN}{BOLD}[+] Berhasil mengkompilasi {cnt} bab ke: {dest.resolve()}{RESET}")
+            _pause()
+        elif choice == "7":
+            def_json = f"{novel_id}_glossary_characters.json"
+            out_json = _prompt("Simpan ke file JSON", default=def_json)
+            reader.export_glossary_and_characters(novel_id, out_json)
+            print(f"\n{GREEN}{BOLD}[+] Karakter dan Glosarium berhasil disimpan ke: {Path(out_json).resolve()}{RESET}")
+            _pause()
+
+
+def interactive_read_backup(initial_path: str | None = None):
+    """Interactive backup reader & explorer based on given path or detected archives."""
+    target_path_str = initial_path
+
+    if not target_path_str:
+        _header("📖 BACA & EKSPLORASI ARSIP BACKUP HERMES")
+        detected = _detect_local_backups()
+        if detected:
+            print("Arsip Backup Terdeteksi di Sekitar Direktori:")
+            for idx, p in enumerate(detected[:8], 1):
+                sz_mb = p.stat().st_size / (1024 * 1024)
+                print(f"  [{idx}] {BOLD}{p.name}{RESET} ({sz_mb:.2f} MB)")
+            print()
+            def_choice = "1"
+        else:
+            def_choice = "hermes_backup_20260817_074046.zip"
+
+        prompt_str = f"Masukkan nomor pilihan [1-{len(detected)}] atau path file backup ZIP/DB" if detected else "Path file backup ZIP/DB"
+        user_input = _prompt(prompt_str, default=def_choice)
+        if not user_input:
+            return
+
+        if user_input.isdigit() and detected:
+            idx = int(user_input) - 1
+            if 0 <= idx < len(detected):
+                target_path_str = str(detected[idx])
+            else:
+                target_path_str = user_input
+        else:
+            target_path_str = user_input
+
+    target_file = Path(target_path_str.strip('"').strip("'"))
+    try:
+        reader = BackupReader(target_file)
+        reader.open()
+    except Exception as e:
+        print(f"\n{RED}[-] Gagal membuka file backup: {e}{RESET}")
+        _pause()
+        return
+
+    try:
+        while True:
+            overview = reader.get_overview()
+            file_info = overview["file"]
+            meta = overview["metadata"]
+            jobs = overview["job_statuses"]
+            novels = overview["novels"]
+
+            _header("📖 INSPEKSI & PEMBACA ARSIP BACKUP HERMES")
+            print(f"  File Arsip       : {BOLD}{CYAN}{file_info.get('filename')}{RESET}")
+            print(f"  Path Lengkap     : {file_info.get('path')}")
+            print(f"  Ukuran File      : {file_info.get('size_mb')} MB ({file_info.get('size_bytes'):,} bytes)")
+            print(f"  Waktu Ekspor     : {BOLD}{meta.get('exported_at') or file_info.get('modified_at')}{RESET}")
+            print(f"  Versi Format     : {meta.get('version', '1.0.0')}")
+            print(f"  Total Jobs Bab   : {BOLD}{overview.get('total_jobs', 0)}{RESET} ({GREEN}{jobs.get('done', 0)} Selesai{RESET}, {RED}{jobs.get('failed', 0)} Gagal{RESET}, {YELLOW}{jobs.get('cancelled', 0)} Batal{RESET})")
+            print(f"  Total Karakter   : {overview.get('total_characters', 0)} entri")
+            print(f"  Total Glosarium  : {overview.get('total_glossary', 0)} entri")
+            print(f"  Akun Cookies     : {overview.get('total_cookies', 0)} akun tersimpan")
+
+            print("\n" + "=" * 65)
+            print(f"  {BOLD}Daftar Novel dalam Backup ({len(novels)} novel):{RESET}")
+            print("=" * 65)
+            if not novels:
+                print(f"  {YELLOW}(Tidak ada data novel di arsip database ini){RESET}")
+            else:
+                for idx, nov in enumerate(novels, 1):
+                    nid = nov["novel_id"]
+                    done = nov["done_chapters"]
+                    tot = nov["total_chapters"]
+                    pct = nov["progress_percent"]
+                    chars = nov["characters_count"]
+                    gloss = nov["glossary_count"]
+                    print(f"  [{idx}] {BOLD}{CYAN}{nid:<32}{RESET} -> {GREEN}{done}/{tot} bab ({pct:.1f}%){RESET} | {chars} chars | {gloss} gloss")
+
+            print("\n" + "=" * 65)
+            print("Pilihan Menu:")
+            print("  [1] Pilih & Eksplorasi Novel Tertentu (Bab, Terjemahan, Karakter, Glosarium)")
+            print("  [2] Ekspor Seluruh Bab Novel yang Selesai ke Folder / File")
+            print("  [3] Ekspor Karakter & Glosarium ke JSON")
+            print("  [4] Lihat Snapshot Akun Cookie & App Settings di Backup")
+            print("  [5] Buka File Backup Lain")
+            print("  [0] Kembali ke Menu Database")
+
+            c = input("\nPilihan [0-5]: ").strip()
+            if c == "0":
+                break
+            elif c == "1":
+                if not novels:
+                    print(f"{YELLOW}Tidak ada novel untuk dieksplorasi.{RESET}")
+                    _pause()
+                    continue
+
+                if len(novels) == 1:
+                    chosen_novel = novels[0]["novel_id"]
+                else:
+                    nov_choice = _prompt(f"Pilih nomor novel [1-{len(novels)}] atau ketik Novel ID", default="1")
+                    if nov_choice.isdigit() and 1 <= int(nov_choice) <= len(novels):
+                        chosen_novel = novels[int(nov_choice) - 1]["novel_id"]
+                    else:
+                        chosen_novel = nov_choice
+
+                _explore_backup_novel(reader, chosen_novel)
+
+            elif c == "2":
+                if not novels:
+                    print(f"{YELLOW}Tidak ada novel untuk diekspor.{RESET}")
+                    _pause()
+                    continue
+
+                nov_choice = _prompt(f"Pilih nomor novel [1-{len(novels)}] atau ketik Novel ID", default="1")
+                if nov_choice.isdigit() and 1 <= int(nov_choice) <= len(novels):
+                    target_nid = novels[int(nov_choice) - 1]["novel_id"]
+                else:
+                    target_nid = nov_choice
+
+                mode = _prompt("Pilih mode ekspor: [1] Tiap bab per-file, [2] Satu file gabungan buku", default="1")
+                fmt = _prompt("Format (txt/md)", default="txt")
+                if mode == "2":
+                    out_p = _prompt("Nama file kompilasi", default=f"{target_nid}_complete.{fmt}")
+                    cnt, dest = reader.export_chapters(target_nid, output_dir=out_p, format=fmt, single_file=True)
+                else:
+                    out_p = _prompt("Folder tujuan", default=f"export_{target_nid}")
+                    cnt, dest = reader.export_chapters(target_nid, output_dir=out_p, format=fmt, single_file=False)
+
+                print(f"\n{GREEN}{BOLD}[+] Berhasil mengekspor {cnt} bab ke: {dest.resolve()}{RESET}")
+                _pause()
+
+            elif c == "3":
+                if not novels:
+                    print(f"{YELLOW}Tidak ada novel.{RESET}")
+                    _pause()
+                    continue
+                nov_choice = _prompt(f"Pilih nomor novel [1-{len(novels)}]", default="1")
+                if nov_choice.isdigit() and 1 <= int(nov_choice) <= len(novels):
+                    target_nid = novels[int(nov_choice) - 1]["novel_id"]
+                else:
+                    target_nid = nov_choice
+
+                out_json = _prompt("Simpan ke file JSON", default=f"{target_nid}_data.json")
+                reader.export_glossary_and_characters(target_nid, out_json)
+                print(f"\n{GREEN}[+] Data berhasil disimpan ke: {Path(out_json).resolve()}{RESET}")
+                _pause()
+
+            elif c == "4":
+                cookies = reader.list_cookies()
+                settings = reader.get_app_settings()
+                _header("🍪 SNAPSHOT COOKIES & SETTINGS DALAM BACKUP")
+                print(f"\n{BOLD}Akun Cookie Tersimpan ({len(cookies)} akun):{RESET}")
+                for ck in cookies:
+                    print(f"  * [{ck.get('id')}] {BOLD}{ck.get('name', 'N/A')}{RESET} | Status: {ck.get('status')} | Total Diproses: {ck.get('total_jobs_processed', 0)} jobs")
+
+                print(f"\n{BOLD}Snapshot App Settings:{RESET}")
+                for k, v in settings.items():
+                    print(f"  * {k:<28}: {v}")
+                _pause()
+
+            elif c == "5":
+                # Switch backup file
+                reader.close()
+                interactive_read_backup()
+                return
+
+    finally:
+        reader.close()
+
+
+# ─── 8. Database Backup & Restore ─────────────────────────────────────────────
+
+
 def interactive_database():
     while True:
         _header("💾 SISTEM BACKUP & RESTORE DATABASE SQLITE")
-        print("  [1] Lihat Statistik Baris Seluruh Tabel Database")
+        print("  [1] Lihat Statistik Baris Seluruh Tabel Database (Server Aktif)")
         print("  [2] Unduh Snapshot Cadangan Database (.zip)")
         print("  [3] Pulihkan / Restore Database dari File Backup (.zip)")
+        print("  [4] 📖 Baca & Eksplorasi Arsip Backup Berdasarkan Path (.zip / .db)")
         print("  [0] Kembali ke Menu Utama")
 
-        c = input("\nPilihan [0-3]: ").strip()
+        c = input("\nPilihan [0-4]: ").strip()
         if c == "0":
             break
         elif c == "1":
@@ -821,6 +1339,8 @@ def interactive_database():
                     for k, v in res["stats_after_restore"].items():
                         print(f"      - {k:<20}: {v}")
             _pause()
+        elif c == "4":
+            interactive_read_backup()
 
 
 # ─── 9. Interactive Chat ──────────────────────────────────────────────────────
